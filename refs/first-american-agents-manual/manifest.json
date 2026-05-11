@@ -1,0 +1,16 @@
+{
+  "name": "first-american-agents-manual",
+  "title": "First American Agents Manual",
+  "source_path": "C:\\Users\\gardn\\Downloads\\Refs\\First American Agents Manual.docx",
+  "source_sha256": "337e7fe7618efa3d57fa1984a7d37b64b80dd4001faaaf382d4bf9e48afc00d4",
+  "citation_template": "{name} \u00a7 {section} - {title}",
+  "embed_model": "voyage-law-2",
+  "embed_dim": 1024,
+  "chunk_target_tokens": 800,
+  "chunk_max_tokens": 1100,
+  "chunk_overlap_tokens": 100,
+  "bm25_tokenizer": "simple",
+  "n_chunks": 13362,
+  "built_at": "2026-05-11T21:14:41Z",
+  "tool_version": "doc-embed 0.1.0"
+}

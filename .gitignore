@@ -1,0 +1,88 @@
+# ── Secrets & local config ──────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg
+*.egg-info/
+*.whl
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage / type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Profiling
+*.prof
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ── Project outputs (regenerated each run) ──────────────────────────────
+out/
+templates/title-report.docx
+templates/title-report.source.sha256
+scripts/research_findings.md
+
+# Per-job source documents and client data — never commit
+docs/
+job.yaml
+Run Sheet*.xlsx
+*.analysis.json
+
+# Smoke-test artifacts
+out/_*.docx
+_*.docx
+
+# ── Office lock / temp files ────────────────────────────────────────────
+~$*
+*.tmp
+*.bak
+*.swp
+*.swo
+*.swn
+
+# ── OS metadata ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+desktop.ini
+
+# ── Editors / IDEs ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.code-workspace
+.history/
+
+# ── Logs ────────────────────────────────────────────────────────────────
+*.log
+logs/

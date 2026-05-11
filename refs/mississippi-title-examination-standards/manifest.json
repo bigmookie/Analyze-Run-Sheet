@@ -1,0 +1,16 @@
+{
+  "name": "mississippi-title-examination-standards",
+  "title": "Mississippi Title Examination Standards",
+  "source_path": "C:\\Users\\gardn\\Downloads\\Refs\\Mississippi Title Examination Standards.docx",
+  "source_sha256": "64105b63e52daaff711f95f58efd391a2b103d79496df85202a3c05837e6689f",
+  "citation_template": "MTES \u00a7 {section} - {name} - {title}",
+  "embed_model": "voyage-3-large",
+  "embed_dim": 1024,
+  "chunk_target_tokens": 800,
+  "chunk_max_tokens": 1100,
+  "chunk_overlap_tokens": 100,
+  "bm25_tokenizer": "simple",
+  "n_chunks": 264,
+  "built_at": "2026-05-11T20:23:45Z",
+  "tool_version": "doc-embed 0.1.0"
+}

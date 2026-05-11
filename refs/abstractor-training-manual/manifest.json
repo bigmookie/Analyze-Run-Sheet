@@ -1,0 +1,16 @@
+{
+  "name": "abstractor-training-manual",
+  "title": "Abstractor Training Manual",
+  "source_path": "C:\\Users\\gardn\\Downloads\\Refs\\Abstractor Training Manual.docx",
+  "source_sha256": "aab2579e3c3e3340bc43a9f2d986f14ce3964d252f2a7e7d4e4df5312387d23c",
+  "citation_template": "{name} \u00a7 {section} - {title}",
+  "embed_model": "voyage-law-2",
+  "embed_dim": 1024,
+  "chunk_target_tokens": 800,
+  "chunk_max_tokens": 1100,
+  "chunk_overlap_tokens": 100,
+  "bm25_tokenizer": "simple",
+  "n_chunks": 6344,
+  "built_at": "2026-05-11T21:23:25Z",
+  "tool_version": "doc-embed 0.1.0"
+}

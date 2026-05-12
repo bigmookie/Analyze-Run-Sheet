@@ -30,8 +30,6 @@ OPUS = "claude-opus-4-7"
 MAX_TOKENS = 16_000
 THINKING_BUDGET = 8_000
 
-RETRIEVE_K = 8
-
 # Pricing per 1M tokens (USD). Verify current rates at console.anthropic.com.
 _RATES: dict[str, dict[str, float]] = {
     SONNET: {"input": 3.00,  "output": 15.00, "cache_write": 3.75,  "cache_read": 0.30},
@@ -168,44 +166,6 @@ def _serialize_tract(p: ParsedRunSheet, tract: Tract) -> str:
     return "\n".join(lines)
 
 
-def _tract_retrieval_query(tract: Tract) -> str:
-    """Build a focused query from the tract's facts to seed reference retrieval."""
-    titles = sorted({r.doc_title for r in tract.rows if r.doc_title})
-    parts = ["Mississippi title examination: chain of title, surface and mineral ownership."]
-    if any(r.mineral_reservations for r in tract.rows):
-        parts.append("Mineral severance and fractional reservation.")
-    if any("Oil, Gas" in t or "Mineral Lease" in t for t in titles):
-        parts.append("Oil and gas mineral lease.")
-    if any("Patent" in t for t in titles):
-        parts.append("Sovereignty patent root of title.")
-    if any("Tax" in t for t in titles):
-        parts.append("Tax sale, redemption, forfeited tax patent.")
-    if any("Chancery" in t or "Decree" in t or "Guardian" in t for t in titles):
-        parts.append("Chancery court partition, sale to pay debts, guardian's deed.")
-    if any("Deed of Trust" in t or "Mortgage" in t for t in titles):
-        parts.append("Deed of trust statute of limitations release.")
-    if any("Right of Way" in t or "Easement" in t for t in titles):
-        parts.append("Right of way easement servitude.")
-    if any("Affidavit" in t for t in titles):
-        parts.append("Heirship affidavit intestate succession.")
-    return " ".join(parts)
-
-
-def _retrieve_refs(query: str, lib) -> str:
-    hits = lib.retrieve(query, k=RETRIEVE_K, rerank=True)
-    if not hits:
-        return "_No reference chunks retrieved._"
-    out = ["# Reference standards (top-{} hits)".format(len(hits)), ""]
-    for h in hits:
-        out.append(f"## {h.citation}")
-        if h.parent_hierarchy:
-            out.append(f"_{' › '.join(h.parent_hierarchy)}_")
-        out.append("")
-        out.append(h.text.strip())
-        out.append("")
-    return "\n".join(out)
-
-
 def _tract_hash(tract: Tract, p: ParsedRunSheet, job: JobConfig) -> str:
     h = hashlib.sha256()
     h.update(job.effective_date.encode())
@@ -242,10 +202,13 @@ def _parse_json(s: str) -> dict:
     return json.loads(_strip_code_fence(s))
 
 
+_CACHE_LONG = {"type": "ephemeral", "ttl": "1h"}
+
+
 def _build_system_blocks() -> list[dict]:
     system_text = _load_prompt("system.md")
     return [
-        {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": system_text, "cache_control": _CACHE_LONG},
     ]
 
 
@@ -253,16 +216,17 @@ def _build_full_runsheet_block(p: ParsedRunSheet) -> dict:
     return {
         "type": "text",
         "text": _serialize_full_run_sheet(p),
-        "cache_control": {"type": "ephemeral"},
+        "cache_control": _CACHE_LONG,
     }
 
 
-def _build_tract_context_block(p: ParsedRunSheet, tract: Tract, refs_text: str) -> dict:
-    body = _serialize_tract(p, tract) + "\n\n" + refs_text
+def _build_tract_context_block(p: ParsedRunSheet, tract: Tract) -> dict:
+    """Per-tract focused view. Authorities are now fetched on-demand via the
+    search_authority tool, not embedded here."""
     return {
         "type": "text",
-        "text": body,
-        "cache_control": {"type": "ephemeral"},
+        "text": _serialize_tract(p, tract),
+        "cache_control": _CACHE_LONG,
     }
 
 
@@ -279,19 +243,112 @@ class _AreaResult:
     raw: dict
 
 
+SEARCH_AUTHORITY_TOOL = {
+    "name": "search_authority",
+    "description": (
+        "Search the firm's embedded reference library (Mississippi Title "
+        "Examination Standards, abstractor training manual, First American "
+        "Agents Manual) for guidance on a specific issue. Use this ONLY for "
+        "fringe issues or novel questions where you need authoritative "
+        "support beyond your training and the methodology already in the "
+        "system prompt. Do NOT call this for routine determinations — your "
+        "default knowledge of Mississippi title practice and the system "
+        "prompt's methodology cover the standard cases."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "A focused search query describing the issue (e.g., "
+                    "'forfeited tax patent curative effect', "
+                    "'after-acquired title quitclaim Mississippi')."
+                ),
+            },
+            "k": {
+                "type": "integer",
+                "description": "Number of chunks to retrieve (default 5, max 10).",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+def _execute_tool(name: str, input_: dict, refs_lib) -> str:
+    if name == "search_authority":
+        query = (input_ or {}).get("query", "")
+        k = max(1, min(int((input_ or {}).get("k", 5)), 10))
+        try:
+            hits = refs_lib.retrieve(query, k=k, rerank=False)
+        except Exception as e:
+            return f"Retrieval error: {type(e).__name__}: {e}"
+        if not hits:
+            return "No relevant authorities found."
+        lines = [f"# Retrieved authorities for: {query!r}", ""]
+        for h in hits:
+            lines.append(f"## {h.citation}")
+            if h.parent_hierarchy:
+                lines.append("_" + " › ".join(h.parent_hierarchy) + "_")
+            lines.append("")
+            lines.append(h.text.strip())
+            lines.append("")
+        return "\n".join(lines)
+    return f"Unknown tool: {name}"
+
+
 def _call(
     client: anthropic.Anthropic,
     system_blocks: list[dict],
     messages: list[dict],
     model: str,
-) -> anthropic.types.Message:
-    return client.messages.create(
+    refs_lib=None,
+    usage: dict[str, TokenUsage] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> tuple[anthropic.types.Message, list[dict]]:
+    """Send a request and follow any tool-use loop.
+
+    Returns the final non-tool-use response and the updated message history
+    (so the caller can append the model's last reply for the next turn).
+    """
+    kwargs = dict(
         model=model,
         max_tokens=MAX_TOKENS,
         thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
         system=system_blocks,
         messages=messages,
     )
+    if refs_lib is not None:
+        kwargs["tools"] = [SEARCH_AUTHORITY_TOOL]
+
+    while True:
+        resp = client.messages.create(**kwargs)
+        _acc(usage, model, resp)
+
+        if resp.stop_reason != "tool_use":
+            return resp, messages
+
+        # Execute every tool_use block in the response.
+        tool_results = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "tool_use":
+                if on_progress:
+                    q = (block.input or {}).get("query", "")
+                    on_progress(f"  search_authority({q!r})")
+                result_text = _execute_tool(block.name, block.input, refs_lib)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_text,
+                })
+
+        messages = messages + [
+            {"role": "assistant", "content": resp.content},
+            {"role": "user", "content": tool_results},
+        ]
+        kwargs["messages"] = messages
 
 
 def _run_area(
@@ -301,6 +358,7 @@ def _run_area(
     task_block: dict,
     schema_cls,
     *,
+    refs_lib,
     initial_model: str = SONNET,
     on_progress: Callable[[str], None] | None = None,
     usage: dict[str, TokenUsage] | None = None,
@@ -312,8 +370,10 @@ def _run_area(
     messages = messages + [{"role": "user", "content": [task_block]}]
     if on_progress:
         on_progress(f"  calling {initial_model}...")
-    resp = _call(client, system_blocks, messages, initial_model)
-    _acc(usage, initial_model, resp)
+    resp, messages = _call(
+        client, system_blocks, messages, initial_model,
+        refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+    )
     text = _extract_text(resp)
     messages = messages + [{"role": "assistant", "content": text}]
 
@@ -331,8 +391,10 @@ def _run_area(
             ),
         }
         messages = messages + [{"role": "user", "content": [retry]}]
-        resp = _call(client, system_blocks, messages, initial_model)
-        _acc(usage, initial_model, resp)
+        resp, messages = _call(
+            client, system_blocks, messages, initial_model,
+            refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+        )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         obj = schema_cls.model_validate(_parse_json(text))
@@ -351,8 +413,10 @@ def _run_area(
             ),
         }
         messages = messages + [{"role": "user", "content": [escalate]}]
-        resp = _call(client, system_blocks, messages, OPUS)
-        _acc(usage, OPUS, resp)
+        resp, messages = _call(
+            client, system_blocks, messages, OPUS,
+            refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+        )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         obj = schema_cls.model_validate(_parse_json(text))
@@ -373,16 +437,13 @@ def analyze_tract(
     log = on_progress or (lambda s: None)
     usage: dict[str, TokenUsage] = {}
 
-    log(f"Tract {tract.id}: retrieving authorities …")
-    refs_text = _retrieve_refs(_tract_retrieval_query(tract), refs_lib)
-
     system_blocks = _build_system_blocks()
     base_messages = [
         {
             "role": "user",
             "content": [
                 _build_full_runsheet_block(p),
-                _build_tract_context_block(p, tract, refs_text),
+                _build_tract_context_block(p, tract),
             ],
         }
     ]
@@ -391,14 +452,14 @@ def analyze_tract(
     surface, surface_model, messages = _run_area(
         client, system_blocks, base_messages,
         _build_task_block("surface.md", tract.id, job),
-        SurfaceChain, on_progress=log, usage=usage,
+        SurfaceChain, refs_lib=refs_lib, on_progress=log, usage=usage,
     )
 
     log(f"Tract {tract.id}: mineral chain …")
     mineral, mineral_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("mineral.md", tract.id, job),
-        MineralChain, on_progress=log, usage=usage,
+        MineralChain, refs_lib=refs_lib, on_progress=log, usage=usage,
     )
 
     # Reconcile mineral fractions; on imbalance, ask Claude to fix.
@@ -419,8 +480,10 @@ def analyze_tract(
             ),
         }
         messages = messages + [{"role": "user", "content": [fix]}]
-        resp = _call(client, system_blocks, messages, OPUS)
-        _acc(usage, OPUS, resp)
+        resp, messages = _call(
+            client, system_blocks, messages, OPUS,
+            refs_lib=refs_lib, usage=usage, on_progress=log,
+        )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         mineral = MineralChain.model_validate(_parse_json(text))
@@ -431,7 +494,7 @@ def analyze_tract(
     exceptions, exceptions_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("exceptions.md", tract.id, job),
-        Exceptions, on_progress=log, usage=usage,
+        Exceptions, refs_lib=refs_lib, on_progress=log, usage=usage,
     )
 
     ta = TractAnalysis(

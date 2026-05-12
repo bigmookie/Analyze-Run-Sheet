@@ -11,6 +11,7 @@ import sys
 import threading
 import tkinter as tk
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -265,14 +266,16 @@ def main() -> int:
         return 1
 
     progress = ProgressWindow(root, title=f"Analyzing {rs_path.name}")
+    log_lock = threading.Lock()
 
     def log(msg: str) -> None:
-        """Write to both the terminal and the Tkinter progress window."""
-        print(msg, flush=True)
-        try:
-            progress.log(msg)
-        except Exception:
-            pass
+        """Write to both the terminal and the Tkinter progress window (thread-safe)."""
+        with log_lock:
+            print(msg, flush=True)
+            try:
+                progress.log(msg)
+            except Exception:
+                pass
 
     log(f"Run sheet : {rs_path}")
     log(f"Tracts    : {', '.join(selected)}")
@@ -286,48 +289,63 @@ def main() -> int:
     client = anthropic.Anthropic()
     analyses: dict[str, "analyzer_mod.TractAnalysis"] = {}
     total_usage: dict[str, TokenUsage] = {}
+    state_lock = threading.Lock()
+
+    max_workers = max(1, int(os.environ.get("ANALYZER_PARALLEL", "4")))
+    log(f"Parallel workers: {max_workers}")
+    log("")
 
     def _merge_usage(src: dict[str, TokenUsage]) -> None:
-        for model, u in src.items():
-            if model not in total_usage:
-                total_usage[model] = TokenUsage()
-            total_usage[model].input_tokens      += u.input_tokens
-            total_usage[model].output_tokens     += u.output_tokens
-            total_usage[model].cache_write_tokens += u.cache_write_tokens
-            total_usage[model].cache_read_tokens  += u.cache_read_tokens
+        with state_lock:
+            for model, u in src.items():
+                if model not in total_usage:
+                    total_usage[model] = TokenUsage()
+                total_usage[model].input_tokens       += u.input_tokens
+                total_usage[model].output_tokens      += u.output_tokens
+                total_usage[model].cache_write_tokens += u.cache_write_tokens
+                total_usage[model].cache_read_tokens  += u.cache_read_tokens
+
+    def process_tract(tid: str) -> None:
+        tract = parsed.tracts[tid]
+        input_hash = analyzer_mod._tract_hash(tract, parsed, job)
+        cached = None if rebuild else cache_mod.load(out_dir, tid, input_hash)
+        if cached is not None:
+            log(f"[{tid}] cached — skipping API calls")
+            with state_lock:
+                analyses[tid] = cached
+            return
+        log(f"[{tid}] starting …")
+        try:
+            ta, tract_usage = analyze_tract(
+                client=client,
+                p=parsed,
+                tract=tract,
+                job=job,
+                refs_lib=refs_lib,
+                on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
+            )
+            _merge_usage(tract_usage)
+            cache_mod.save(out_dir, ta)
+            with state_lock:
+                analyses[tid] = ta
+            used = ta.model_used
+            log(
+                f"[{tid}] done  "
+                f"surface={ta.surface.confidence}/{used.get('surface','?')}  "
+                f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
+                f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}"
+            )
+        except Exception as e:
+            log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
+            traceback.print_exc()
 
     def worker():
-        for tid in selected:
-            tract = parsed.tracts[tid]
-            input_hash = analyzer_mod._tract_hash(tract, parsed, job)
-            cached = None if rebuild else cache_mod.load(out_dir, tid, input_hash)
-            if cached is not None:
-                log(f"[{tid}] cached — skipping API calls")
-                analyses[tid] = cached
-                continue
-            log(f"[{tid}] starting …")
-            try:
-                ta, tract_usage = analyze_tract(
-                    client=client,
-                    p=parsed,
-                    tract=tract,
-                    job=job,
-                    refs_lib=refs_lib,
-                    on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
-                )
-                _merge_usage(tract_usage)
-                cache_mod.save(out_dir, ta)
-                analyses[tid] = ta
-                used = ta.model_used
-                log(
-                    f"[{tid}] done  "
-                    f"surface={ta.surface.confidence}/{used.get('surface','?')}  "
-                    f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
-                    f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}"
-                )
-            except Exception as e:
-                log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
-                traceback.print_exc()
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(process_tract, tid) for tid in selected]
+            for f in as_completed(futures):
+                # Any exception propagates here. process_tract already logs &
+                # swallows per-tract failures, so f.result() is just a join.
+                f.result()
 
         if not analyses:
             log("\nNo successful tract analyses. Nothing to render.")

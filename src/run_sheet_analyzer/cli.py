@@ -14,10 +14,12 @@ import platform
 import subprocess
 import sys
 import threading
+import tkinter as tk
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
+from tkinter import filedialog
 
 import yaml
 
@@ -145,6 +147,34 @@ def _prompt_tracts(tract_ids: list[str]) -> list[str]:
     return [t for t in tract_ids if t not in skip]
 
 
+def _pick_run_sheet_dialog() -> str | None:
+    """Open a Tk file picker for the run sheet, then destroy the Tk root.
+
+    Tk is used only here; the rest of the program is pure CLI.
+    """
+    root = tk.Tk()
+    root.withdraw()
+    # Windows: shove the dialog to the foreground so it doesn't get stranded
+    # behind PowerShell.
+    try:
+        root.attributes("-topmost", True)
+        root.update()
+    except Exception:
+        pass
+    try:
+        path = filedialog.askopenfilename(
+            parent=root,
+            title="Select a run sheet (.xlsx)",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+        )
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    return path or None
+
+
 def _open_file_native(path: Path) -> None:
     try:
         if platform.system() == "Windows":
@@ -192,15 +222,18 @@ def main() -> int:
         print(f"ERROR: {env_err}", flush=True)
         return 1
 
-    # Run sheet path
+    # Run sheet path — file dialog by default, CLI arg overrides it.
     if args.run_sheet:
         rs_path = Path(_clean_path(args.run_sheet))
     else:
-        raw = input("Path to run sheet .xlsx (drag the file here or paste the path): ")
-        if not raw.strip():
-            print("No file path given; exiting.", flush=True)
+        print(">> Opening file picker — select your run sheet .xlsx.", flush=True)
+        print("   (If the dialog doesn't appear, check the taskbar for a Tk window.)",
+              flush=True)
+        picked = _pick_run_sheet_dialog()
+        if not picked:
+            print("No file selected; exiting.", flush=True)
             return 1
-        rs_path = Path(_clean_path(raw))
+        rs_path = Path(picked)
 
     if not rs_path.is_file():
         print(f"ERROR: file not found: {rs_path}", flush=True)

@@ -30,7 +30,7 @@ import anthropic
 
 from run_sheet_analyzer import analyzer as analyzer_mod
 from run_sheet_analyzer import cache as cache_mod
-from run_sheet_analyzer.analyzer import JobConfig, analyze_tract, load_refs_or_die
+from run_sheet_analyzer.analyzer import OPUS, SONNET, JobConfig, analyze_tract, load_refs_or_die
 from run_sheet_analyzer.parser import MissingColumnsError, parse
 from run_sheet_analyzer.renderer import render_report
 from run_sheet_analyzer.template_builder import ensure_template
@@ -198,6 +198,14 @@ def _open_file_native(path: Path) -> None:
 
 
 def main() -> int:
+    print(flush=True)
+    print("=" * 60, flush=True)
+    print("  Run Sheet Analyzer", flush=True)
+    print(f"  Analysis model  : {SONNET}", flush=True)
+    print(f"  Escalation model: {OPUS}  (on low confidence)", flush=True)
+    print("=" * 60, flush=True)
+    print(flush=True)
+
     root = tk.Tk()
     root.withdraw()
 
@@ -255,10 +263,19 @@ def main() -> int:
         return 1
 
     progress = ProgressWindow(root, title=f"Analyzing {rs_path.name}")
-    progress.log(f"Run sheet: {rs_path}")
-    progress.log(f"Tracts selected: {', '.join(selected)}")
-    progress.log(f"Reference DBs loaded: {', '.join(refs_lib.stats().keys())}")
-    progress.log("")
+
+    def log(msg: str) -> None:
+        """Write to both the terminal and the Tkinter progress window."""
+        print(msg, flush=True)
+        try:
+            progress.log(msg)
+        except Exception:
+            pass
+
+    log(f"Run sheet : {rs_path}")
+    log(f"Tracts    : {', '.join(selected)}")
+    log(f"Ref DBs   : {', '.join(refs_lib.stats().keys())}")
+    log("")
 
     out_dir = rs_path.parent / "out"
     out_dir.mkdir(exist_ok=True)
@@ -273,10 +290,10 @@ def main() -> int:
             input_hash = analyzer_mod._tract_hash(tract, parsed, job)
             cached = None if rebuild else cache_mod.load(out_dir, tid, input_hash)
             if cached is not None:
-                progress.log(f"[{tid}] using cached analysis")
+                log(f"[{tid}] cached — skipping API calls")
                 analyses[tid] = cached
                 continue
-            progress.log(f"[{tid}] starting …")
+            log(f"[{tid}] starting …")
             try:
                 ta = analyze_tract(
                     client=client,
@@ -284,22 +301,26 @@ def main() -> int:
                     tract=tract,
                     job=job,
                     refs_lib=refs_lib,
-                    on_progress=lambda s, tid=tid: progress.log(f"[{tid}] {s}"),
+                    on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
                 )
                 cache_mod.save(out_dir, ta)
                 analyses[tid] = ta
-                progress.log(f"[{tid}] done — surface={ta.surface.confidence}, "
-                             f"mineral={ta.mineral.confidence}, "
-                             f"exceptions={ta.exceptions.confidence}")
+                used = ta.model_used
+                log(
+                    f"[{tid}] done  "
+                    f"surface={ta.surface.confidence}/{used.get('surface','?')}  "
+                    f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
+                    f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}"
+                )
             except Exception as e:
-                progress.log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
+                log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
                 traceback.print_exc()
 
         if not analyses:
-            progress.log("\nNo successful tract analyses. Nothing to render.")
+            log("\nNo successful tract analyses. Nothing to render.")
             return
 
-        progress.log("\nRendering consolidated report …")
+        log("\nRendering consolidated report …")
         ordered = [analyses[tid] for tid in selected if tid in analyses]
         report_path = rs_path.parent / f"{rs_path.stem} - Draft Report.docx"
         try:
@@ -319,7 +340,7 @@ def main() -> int:
                 },
                 analyses,
             )
-            progress.log(f"Report written: {report_path}")
+            log(f"Report written: {report_path}")
             _open_file_native(report_path)
             messagebox.showinfo(
                 "Done",
@@ -328,7 +349,7 @@ def main() -> int:
             )
         except Exception as e:
             traceback.print_exc()
-            progress.log(f"Render FAILED: {type(e).__name__}: {e}")
+            log(f"Render FAILED: {type(e).__name__}: {e}")
             messagebox.showerror("Render failed", f"{type(e).__name__}: {e}")
 
     threading.Thread(target=worker, daemon=True).start()

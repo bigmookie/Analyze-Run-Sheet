@@ -30,6 +30,14 @@ OPUS = "claude-opus-4-7"
 MAX_TOKENS = 16_000
 THINKING_BUDGET = 8_000
 
+# Defensive limits.
+MAX_TOOL_ITERATIONS = 6        # cap on tool-use loop iterations per area turn
+MAX_API_RETRIES = 5            # our own visible retry count (SDK retries are disabled)
+RETRY_BACKOFF_BASE = 3.0       # seconds; doubled each retry, capped at 60s
+
+# Beta header to unlock 1-hour cache TTL.
+_CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
+
 # Pricing per 1M tokens (USD). Verify current rates at console.anthropic.com.
 _RATES: dict[str, dict[str, float]] = {
     SONNET: {"input": 3.00,  "output": 15.00, "cache_write": 3.75,  "cache_read": 0.30},
@@ -299,6 +307,55 @@ def _execute_tool(name: str, input_: dict, refs_lib) -> str:
     return f"Unknown tool: {name}"
 
 
+def _create_with_retry(
+    client: anthropic.Anthropic,
+    kwargs: dict,
+    on_progress: Callable[[str], None] | None,
+) -> anthropic.types.Message:
+    """Visible retry loop for the Anthropic API.
+
+    The SDK is configured with max_retries=0 so we see every attempt. We log
+    every retry, every overloaded/rate-limited response, and every timing,
+    so the user never wonders whether the script is hung.
+    """
+    import time
+    import anthropic as _anthropic
+
+    transient = (
+        _anthropic.APIConnectionError,
+        _anthropic.APITimeoutError,
+        _anthropic.RateLimitError,
+        _anthropic.InternalServerError,
+    )
+
+    for attempt in range(1, MAX_API_RETRIES + 1):
+        t0 = time.time()
+        try:
+            resp = client.messages.create(**kwargs)
+            dt = time.time() - t0
+            if on_progress and dt > 5.0:
+                on_progress(f"  API call returned in {dt:.1f}s")
+            return resp
+        except transient as e:
+            dt = time.time() - t0
+            if attempt >= MAX_API_RETRIES:
+                if on_progress:
+                    on_progress(f"  API gave up after {attempt} attempts: {type(e).__name__}: {e}")
+                raise
+            sleep_s = min(RETRY_BACKOFF_BASE * (2 ** (attempt - 1)), 60.0)
+            if on_progress:
+                on_progress(
+                    f"  API attempt {attempt}/{MAX_API_RETRIES} failed in {dt:.1f}s "
+                    f"({type(e).__name__}); retrying in {sleep_s:.0f}s"
+                )
+            time.sleep(sleep_s)
+        except _anthropic.APIStatusError as e:
+            # Non-retryable status error — surface immediately.
+            if on_progress:
+                on_progress(f"  API error: {type(e).__name__}: {e}")
+            raise
+
+
 def _call(
     client: anthropic.Anthropic,
     system_blocks: list[dict],
@@ -319,16 +376,26 @@ def _call(
         thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
         system=system_blocks,
         messages=messages,
+        extra_headers=_CACHE_BETA_HEADER,
     )
     if refs_lib is not None:
         kwargs["tools"] = [SEARCH_AUTHORITY_TOOL]
 
-    while True:
-        resp = client.messages.create(**kwargs)
+    for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
+        resp = _create_with_retry(client, kwargs, on_progress)
         _acc(usage, model, resp)
 
         if resp.stop_reason != "tool_use":
             return resp, messages
+
+        if iteration == MAX_TOOL_ITERATIONS:
+            # Force the model to stop using tools and give a final answer.
+            if on_progress:
+                on_progress(
+                    f"  WARNING: tool-use loop hit cap ({MAX_TOOL_ITERATIONS}); "
+                    "requesting final response without tools"
+                )
+            kwargs.pop("tools", None)
 
         # Execute every tool_use block in the response.
         tool_results = []
@@ -349,6 +416,12 @@ def _call(
             {"role": "user", "content": tool_results},
         ]
         kwargs["messages"] = messages
+
+    # Shouldn't reach here, but if we do, do one final no-tools call.
+    kwargs.pop("tools", None)
+    resp = _create_with_retry(client, kwargs, on_progress)
+    _acc(usage, model, resp)
+    return resp, messages
 
 
 def _run_area(

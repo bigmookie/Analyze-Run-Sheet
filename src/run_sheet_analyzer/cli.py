@@ -181,11 +181,11 @@ class ProgressWindow(tk.Toplevel):
         self.text.configure(state="disabled")
 
     def log(self, line: str):
+        # Always called on the Tk main thread (scheduled via root.after).
         self.text.configure(state="normal")
         self.text.insert("end", line + "\n")
         self.text.see("end")
         self.text.configure(state="disabled")
-        self.update_idletasks()
 
 
 def _open_file_native(path: Path) -> None:
@@ -269,13 +269,17 @@ def main() -> int:
     log_lock = threading.Lock()
 
     def log(msg: str) -> None:
-        """Write to both the terminal and the Tkinter progress window (thread-safe)."""
+        """Write to both the terminal and the Tkinter progress window (thread-safe).
+
+        Tk is not thread-safe; widget mutations are marshaled onto the main
+        thread via root.after(0, ...).
+        """
         with log_lock:
             print(msg, flush=True)
-            try:
-                progress.log(msg)
-            except Exception:
-                pass
+        try:
+            root.after(0, lambda m=msg: progress.log(m))
+        except Exception:
+            pass
 
     log(f"Run sheet : {rs_path}")
     log(f"Tracts    : {', '.join(selected)}")
@@ -286,12 +290,17 @@ def main() -> int:
     out_dir.mkdir(exist_ok=True)
     rebuild = bool(os.environ.get("ANALYZER_REBUILD"))
 
-    client = anthropic.Anthropic()
+    # max_retries=0 so our own retry loop in analyzer._create_with_retry
+    # is the one visible to the user. Generous per-call timeout for extended
+    # thinking. timeout=600s; SDK default may be lower.
+    client = anthropic.Anthropic(max_retries=0, timeout=600.0)
     analyses: dict[str, "analyzer_mod.TractAnalysis"] = {}
     total_usage: dict[str, TokenUsage] = {}
     state_lock = threading.Lock()
 
-    max_workers = max(1, int(os.environ.get("ANALYZER_PARALLEL", "4")))
+    # Default to 2 parallel workers — keeps load on the Anthropic API low so
+    # overload retries don't stack up. Override via ANALYZER_PARALLEL.
+    max_workers = max(1, int(os.environ.get("ANALYZER_PARALLEL", "2")))
     log(f"Parallel workers: {max_workers}")
     log("")
 

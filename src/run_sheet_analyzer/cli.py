@@ -88,6 +88,10 @@ def _prompt_job_fields(parent, current: JobConfig) -> JobConfig:
     dlg.transient(parent)
     dlg.grab_set()
     dlg.resizable(False, False)
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.after(50, lambda: dlg.attributes("-topmost", False))
+    dlg.focus_force()
 
     frm = ttk.Frame(dlg, padding=12)
     frm.pack(fill="both", expand=True)
@@ -137,6 +141,10 @@ def _confirm_tracts(parent, tract_ids: list[str]) -> list[str] | None:
     dlg.title("Confirm tracts to analyze")
     dlg.transient(parent)
     dlg.grab_set()
+    dlg.lift()
+    dlg.attributes("-topmost", True)
+    dlg.after(50, lambda: dlg.attributes("-topmost", False))
+    dlg.focus_force()
 
     ttk.Label(dlg, text="Discovered tracts (uncheck any to skip):", padding=8).pack(anchor="w")
 
@@ -200,6 +208,16 @@ def _open_file_native(path: Path) -> None:
         pass
 
 
+def _bring_to_front(root: tk.Tk) -> None:
+    """Force a Tk dialog parent to the foreground (Windows is fussy about this)."""
+    try:
+        root.attributes("-topmost", True)
+        root.update()
+        root.attributes("-topmost", False)
+    except Exception:
+        pass
+
+
 def main() -> int:
     print(flush=True)
     print("=" * 60, flush=True)
@@ -211,59 +229,91 @@ def main() -> int:
 
     root = tk.Tk()
     root.withdraw()
+    # Make sure subsequent dialogs aren't stranded behind PowerShell.
+    _bring_to_front(root)
 
     env_err = _check_env()
     if env_err:
+        print(f"ERROR: {env_err}", flush=True)
         messagebox.showerror("Missing API keys", env_err)
         return 1
 
+    print(">> Opening file picker — select your run sheet .xlsx (the dialog "
+          "may be behind PowerShell; check the taskbar).", flush=True)
+    _bring_to_front(root)
     rs_path = filedialog.askopenfilename(
+        parent=root,
         title="Select a run sheet (.xlsx)",
         filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
     )
     if not rs_path:
+        print("No file selected; exiting.", flush=True)
         return 1
     rs_path = Path(rs_path)
+    print(f"Selected: {rs_path}", flush=True)
 
+    print("Parsing run sheet …", flush=True)
     try:
         parsed = parse(rs_path)
     except MissingColumnsError as e:
+        print(f"ERROR: {e}", flush=True)
         messagebox.showerror("Run sheet rejected", str(e))
         return 1
     except Exception as e:
+        print(f"ERROR: {type(e).__name__}: {e}", flush=True)
         messagebox.showerror("Could not read run sheet", f"{type(e).__name__}: {e}")
         return 1
+    print(f"  {len(parsed.rows)} rows, {len(parsed.tract_ids())} tracts, "
+          f"{len(parsed.not_subject_rows)} NS, {len(parsed.unparseable_le_rows)} bare-LE",
+          flush=True)
 
     if parsed.unparseable_le_rows:
         msg = (
             f"{len(parsed.unparseable_le_rows)} row(s) tagged as Less-and-Except (LE) "
             "have no base tract. These rows will be omitted. Continue?"
         )
-        if not messagebox.askyesno("Unparseable LE rows", msg):
+        _bring_to_front(root)
+        if not messagebox.askyesno("Unparseable LE rows", msg, parent=root):
+            print("User declined; exiting.", flush=True)
             return 1
 
+    print("Loading reference libraries …", flush=True)
     try:
         refs_lib = load_refs_or_die(REFS_DIR)
     except RuntimeError as e:
+        print(f"ERROR: {e}", flush=True)
         messagebox.showerror("Reference library missing", str(e))
         return 1
+    print(f"  loaded: {', '.join(refs_lib.stats().keys())}", flush=True)
 
+    print("Preparing report template …", flush=True)
     ensure_template(TEMPLATE_SOURCE, TEMPLATE_DEST)
 
+    print("Loading job config …", flush=True)
     job = _load_job(rs_path.parent)
+    print(">> Opening job-details dialog (check the taskbar if you don't see it).",
+          flush=True)
+    _bring_to_front(root)
     job = _prompt_job_fields(root, job)
     if not job.effective_date:
+        print("No effective date supplied; exiting.", flush=True)
         messagebox.showerror("Cancelled", "An Effective Date is required.")
         return 1
 
     tract_ids = parsed.tract_ids()
     if not tract_ids:
+        print("ERROR: No tract IDs found in the run sheet.", flush=True)
         messagebox.showerror("No tracts", "No tract IDs found in the run sheet.")
         return 1
 
+    print(f">> Opening tract-confirmation dialog ({len(tract_ids)} tracts found).",
+          flush=True)
+    _bring_to_front(root)
     selected = _confirm_tracts(root, tract_ids)
     if selected is None or not selected:
+        print("No tracts selected; exiting.", flush=True)
         return 1
+    print(f"Confirmed {len(selected)} tracts: {', '.join(selected)}", flush=True)
 
     progress = ProgressWindow(root, title=f"Analyzing {rs_path.name}")
     log_lock = threading.Lock()

@@ -56,11 +56,14 @@ def _model_thinking_params(model: str) -> dict:
 
     Sonnet 4.6 wants thinking={"type":"enabled","budget_tokens":N}.
     Opus 4.7 wants thinking={"type":"adaptive"} + output_config.effort.
+
+    `output_config` is passed via extra_body so this works on every Anthropic
+    SDK version, not just those that have added it as a typed kwarg.
     """
     if "opus-4-7" in model:
         return {
             "thinking": {"type": "adaptive"},
-            "output_config": {"effort": OPUS_THINKING_EFFORT},
+            "extra_body": {"output_config": {"effort": OPUS_THINKING_EFFORT}},
         }
     return {
         "thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET},

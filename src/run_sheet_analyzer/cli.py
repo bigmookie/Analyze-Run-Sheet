@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import signal
 import subprocess
 import sys
 import threading
@@ -37,7 +38,8 @@ import anthropic
 from run_sheet_analyzer import analyzer as analyzer_mod
 from run_sheet_analyzer import cache as cache_mod
 from run_sheet_analyzer.analyzer import (
-    OPUS, SONNET, TokenUsage, JobConfig, analyze_tract, load_refs_or_die,
+    OPUS, SONNET, AnalysisInterrupted, TokenUsage, JobConfig,
+    analyze_tract, load_refs_or_die, stop_event,
 )
 from run_sheet_analyzer.parser import MissingColumnsError, parse
 from run_sheet_analyzer.renderer import render_report
@@ -175,6 +177,33 @@ def _pick_run_sheet_dialog() -> str | None:
     return path or None
 
 
+_ctrl_c_count = 0
+
+
+def _install_interrupt_handler() -> None:
+    """Two-stage Ctrl+C:
+       1st press → drain in-flight work, write any completed reports, exit cleanly.
+       2nd press → immediate force-quit (os._exit).
+    """
+    def handler(signum, frame):
+        global _ctrl_c_count
+        _ctrl_c_count += 1
+        if _ctrl_c_count == 1:
+            stop_event.set()
+            print(
+                "\n\n!! Ctrl+C — finishing in-flight API calls, then stopping.\n"
+                "   Press Ctrl+C AGAIN to force-quit immediately.\n",
+                flush=True,
+            )
+        else:
+            print("\nForce-quit.\n", flush=True)
+            os._exit(130)
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except Exception:
+        pass
+
+
 def _open_file_native(path: Path) -> None:
     try:
         if platform.system() == "Windows":
@@ -209,11 +238,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    _install_interrupt_handler()
+
     print(flush=True)
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
     print(f"  Analysis model  : {SONNET}", flush=True)
     print(f"  Escalation model: {OPUS}  (on low confidence)", flush=True)
+    print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)
 
@@ -330,6 +362,9 @@ def main() -> int:
                 total_usage[model].cache_read_tokens  += u.cache_read_tokens
 
     def process_tract(tid: str) -> None:
+        if stop_event.is_set():
+            log(f"[{tid}] skipped (interrupted)")
+            return
         tract = parsed.tracts[tid]
         input_hash = analyzer_mod._tract_hash(tract, parsed, job)
         cached = None if rebuild else cache_mod.load(out_dir, tid, input_hash)
@@ -359,15 +394,29 @@ def main() -> int:
                 f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
                 f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}"
             )
+        except AnalysisInterrupted:
+            log(f"[{tid}] interrupted before completion")
         except Exception as e:
             log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(process_tract, tid) for tid in selected]
-        for f in as_completed(futures):
-            f.result()
+        try:
+            for f in as_completed(futures):
+                if stop_event.is_set():
+                    # Cancel anything still queued; in-flight calls finish naturally.
+                    for pending in futures:
+                        pending.cancel()
+                f.result()
+        except KeyboardInterrupt:
+            # Belt-and-suspenders: signal handler should have already set stop_event.
+            stop_event.set()
+            for pending in futures:
+                pending.cancel()
 
+    if stop_event.is_set():
+        log("\n!! Run interrupted by user — rendering whatever completed.")
     if not analyses:
         log("\nNo successful tract analyses. Nothing to render.")
         return 1
@@ -431,4 +480,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted.", flush=True)
+        raise SystemExit(130)

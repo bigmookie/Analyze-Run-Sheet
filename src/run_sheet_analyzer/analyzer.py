@@ -10,11 +10,27 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
+
+
+class AnalysisInterrupted(Exception):
+    """Raised when the user requests a graceful stop via Ctrl+C."""
+
+
+# Set by cli.py from the SIGINT handler. analyzer code checks this between
+# API calls and at the boundary of each area turn so a Ctrl+C lands in
+# bounded time without leaving zombies.
+stop_event = threading.Event()
+
+
+def _check_stop() -> None:
+    if stop_event.is_set():
+        raise AnalysisInterrupted("Interrupted by user")
 
 import anthropic
 from pydantic import ValidationError
@@ -349,6 +365,7 @@ def _create_with_retry(
     )
 
     for attempt in range(1, MAX_API_RETRIES + 1):
+        _check_stop()
         t0 = time.time()
         try:
             resp = client.messages.create(**kwargs)
@@ -368,7 +385,9 @@ def _create_with_retry(
                     f"  API attempt {attempt}/{MAX_API_RETRIES} failed in {dt:.1f}s "
                     f"({type(e).__name__}); retrying in {sleep_s:.0f}s"
                 )
-            time.sleep(sleep_s)
+            # Interruptible sleep so Ctrl+C during backoff is fast.
+            if stop_event.wait(timeout=sleep_s):
+                raise AnalysisInterrupted("Interrupted during retry backoff")
         except _anthropic.APIStatusError as e:
             # Non-retryable status error — surface immediately.
             if on_progress:
@@ -530,6 +549,7 @@ def analyze_tract(
     log = on_progress or (lambda s: None)
     usage: dict[str, TokenUsage] = {}
 
+    _check_stop()
     system_blocks = _build_system_blocks()
     base_messages = [
         {
@@ -548,6 +568,7 @@ def analyze_tract(
         SurfaceChain, refs_lib=refs_lib, on_progress=log, usage=usage,
     )
 
+    _check_stop()
     log(f"Tract {tract.id}: mineral chain …")
     mineral, mineral_model, messages = _run_area(
         client, system_blocks, messages,
@@ -583,6 +604,7 @@ def analyze_tract(
         mineral.reconciliation = reconcile(mineral)
         mineral_model = OPUS
 
+    _check_stop()
     log(f"Tract {tract.id}: exceptions …")
     exceptions, exceptions_model, messages = _run_area(
         client, system_blocks, messages,

@@ -346,16 +346,45 @@ def _execute_tool(name: str, input_: dict, refs_lib) -> str:
     return f"Unknown tool: {name}"
 
 
+def _stream_thinking(stream, on_thinking: Callable[[str], None] | None) -> None:
+    """Consume a messages.stream() and forward thinking deltas line-by-line.
+
+    Anthropic emits thinking text as many small chunks; we accumulate until
+    a newline and then push one line at a time to the callback.
+    """
+    buf = ""
+    for event in stream:
+        if getattr(event, "type", None) != "content_block_delta":
+            continue
+        delta = getattr(event, "delta", None)
+        if delta is None or getattr(delta, "type", None) != "thinking_delta":
+            continue
+        chunk = getattr(delta, "thinking", "") or ""
+        if not chunk:
+            continue
+        if on_thinking is None:
+            continue
+        buf += chunk
+        while "\n" in buf:
+            line, _, buf = buf.partition("\n")
+            line = line.rstrip()
+            if line:
+                on_thinking(line)
+    if on_thinking and buf.strip():
+        on_thinking(buf.strip())
+
+
 def _create_with_retry(
     client: anthropic.Anthropic,
     kwargs: dict,
     on_progress: Callable[[str], None] | None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> anthropic.types.Message:
     """Visible retry loop for the Anthropic API.
 
-    The SDK is configured with max_retries=0 so we see every attempt. We log
-    every retry, every overloaded/rate-limited response, and every timing,
-    so the user never wonders whether the script is hung.
+    Uses messages.stream() so we can forward extended-thinking text to the
+    user in real time. The SDK client is configured with max_retries=0 so
+    we see every attempt; backoff is interruptible via stop_event.
     """
     import time
     import anthropic as _anthropic
@@ -371,10 +400,20 @@ def _create_with_retry(
         _check_stop()
         t0 = time.time()
         try:
-            resp = client.messages.create(**kwargs)
+            with client.messages.stream(**kwargs) as stream:
+                _stream_thinking(stream, on_thinking)
+                resp = stream.get_final_message()
             dt = time.time() - t0
-            if on_progress and dt > 5.0:
-                on_progress(f"  API call returned in {dt:.1f}s")
+            if on_progress:
+                u = resp.usage
+                inp = u.input_tokens
+                cached = getattr(u, "cache_read_input_tokens", 0) or 0
+                cwrite = getattr(u, "cache_creation_input_tokens", 0) or 0
+                out = u.output_tokens
+                on_progress(
+                    f"  API returned in {dt:.1f}s "
+                    f"(in={inp:,} cached={cached:,} cache_write={cwrite:,} out={out:,})"
+                )
             return resp
         except transient as e:
             dt = time.time() - t0
@@ -388,11 +427,9 @@ def _create_with_retry(
                     f"  API attempt {attempt}/{MAX_API_RETRIES} failed in {dt:.1f}s "
                     f"({type(e).__name__}); retrying in {sleep_s:.0f}s"
                 )
-            # Interruptible sleep so Ctrl+C during backoff is fast.
             if stop_event.wait(timeout=sleep_s):
                 raise AnalysisInterrupted("Interrupted during retry backoff")
         except _anthropic.APIStatusError as e:
-            # Non-retryable status error — surface immediately.
             if on_progress:
                 on_progress(f"  API error: {type(e).__name__}: {e}")
             raise
@@ -406,6 +443,7 @@ def _call(
     refs_lib=None,
     usage: dict[str, TokenUsage] | None = None,
     on_progress: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> tuple[anthropic.types.Message, list[dict]]:
     """Send a request and follow any tool-use loop.
 
@@ -424,7 +462,7 @@ def _call(
         kwargs["tools"] = [SEARCH_AUTHORITY_TOOL]
 
     for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
-        resp = _create_with_retry(client, kwargs, on_progress)
+        resp = _create_with_retry(client, kwargs, on_progress, on_thinking)
         _acc(usage, model, resp)
 
         if resp.stop_reason != "tool_use":
@@ -476,6 +514,7 @@ def _run_area(
     refs_lib,
     initial_model: str = SONNET,
     on_progress: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
     usage: dict[str, TokenUsage] | None = None,
 ) -> tuple[Any, str, list[dict]]:
     """Send one area turn, parse the response, escalate to Opus on low confidence.
@@ -487,7 +526,7 @@ def _run_area(
         on_progress(f"  calling {initial_model}...")
     resp, messages = _call(
         client, system_blocks, messages, initial_model,
-        refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+        refs_lib=refs_lib, usage=usage, on_progress=on_progress, on_thinking=on_thinking,
     )
     text = _extract_text(resp)
     messages = messages + [{"role": "assistant", "content": text}]
@@ -508,7 +547,7 @@ def _run_area(
         messages = messages + [{"role": "user", "content": [retry]}]
         resp, messages = _call(
             client, system_blocks, messages, initial_model,
-            refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+            refs_lib=refs_lib, usage=usage, on_progress=on_progress, on_thinking=on_thinking,
         )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
@@ -530,7 +569,7 @@ def _run_area(
         messages = messages + [{"role": "user", "content": [escalate]}]
         resp, messages = _call(
             client, system_blocks, messages, OPUS,
-            refs_lib=refs_lib, usage=usage, on_progress=on_progress,
+            refs_lib=refs_lib, usage=usage, on_progress=on_progress, on_thinking=on_thinking,
         )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
@@ -548,6 +587,7 @@ def analyze_tract(
     job: JobConfig,
     refs_lib,
     on_progress: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> tuple[TractAnalysis, dict[str, TokenUsage]]:
     log = on_progress or (lambda s: None)
     usage: dict[str, TokenUsage] = {}
@@ -568,7 +608,7 @@ def analyze_tract(
     surface, surface_model, messages = _run_area(
         client, system_blocks, base_messages,
         _build_task_block("surface.md", tract.id, job),
-        SurfaceChain, refs_lib=refs_lib, on_progress=log, usage=usage,
+        SurfaceChain, refs_lib=refs_lib, on_progress=log, on_thinking=on_thinking, usage=usage,
     )
 
     _check_stop()
@@ -576,7 +616,7 @@ def analyze_tract(
     mineral, mineral_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("mineral.md", tract.id, job),
-        MineralChain, refs_lib=refs_lib, on_progress=log, usage=usage,
+        MineralChain, refs_lib=refs_lib, on_progress=log, on_thinking=on_thinking, usage=usage,
     )
 
     # Reconcile mineral fractions; on imbalance, ask Claude to fix.
@@ -599,7 +639,7 @@ def analyze_tract(
         messages = messages + [{"role": "user", "content": [fix]}]
         resp, messages = _call(
             client, system_blocks, messages, OPUS,
-            refs_lib=refs_lib, usage=usage, on_progress=log,
+            refs_lib=refs_lib, usage=usage, on_progress=log, on_thinking=on_thinking,
         )
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
@@ -612,7 +652,7 @@ def analyze_tract(
     exceptions, exceptions_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("exceptions.md", tract.id, job),
-        Exceptions, refs_lib=refs_lib, on_progress=log, usage=usage,
+        Exceptions, refs_lib=refs_lib, on_progress=log, on_thinking=on_thinking, usage=usage,
     )
 
     ta = TractAnalysis(

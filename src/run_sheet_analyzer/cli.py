@@ -382,17 +382,22 @@ def main() -> int:
                 job=job,
                 refs_lib=refs_lib,
                 on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
+                on_thinking=lambda s, tid=tid: log(f"[{tid}]    ~ {s}"),
             )
             _merge_usage(tract_usage)
             cache_mod.save(out_dir, ta)
             with state_lock:
                 analyses[tid] = ta
+                cum_cost = sum(u.cost_usd(m) for m, u in total_usage.items())
+                tracts_done = len(analyses)
+                tracts_total = len(selected)
             used = ta.model_used
             log(
                 f"[{tid}] done  "
                 f"surface={ta.surface.confidence}/{used.get('surface','?')}  "
                 f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
-                f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}"
+                f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}  "
+                f"|  {tracts_done}/{tracts_total} done, cumulative ~${cum_cost:.4f}"
             )
         except AnalysisInterrupted:
             log(f"[{tid}] interrupted before completion")

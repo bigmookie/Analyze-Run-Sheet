@@ -9,9 +9,9 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
 ## Requirements
 
 - Python 3.10 or newer.
-- The companion **Embeddings DB Creator** project, installed and built at least once. Default location: `C:\Users\gardn\Documents\Projects\Embeddings DB Creator`.
 - An **Anthropic** API key (for Claude analysis).
 - A **Voyage AI** API key (for embedding retrieval queries).
+- The `refs/` directory populated with at least one reference DB, built using the Embeddings DB Creator project.
 
 ---
 
@@ -27,15 +27,14 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
 
    On WSL/macOS/Linux: `source .venv/bin/activate`.
 
-2. **Install runtime dependencies, this project, and the embeddings library.**
+2. **Install runtime dependencies and this project.**
 
    ```powershell
    pip install -r requirements.txt
    pip install -e .
-   pip install -e "C:\Users\gardn\Documents\Projects\Embeddings DB Creator"
    ```
 
-   `requirements.txt` is the single source of truth for runtime dependencies. `pip install -e .` installs this project itself (so `analyze_run_sheet.py` and the `analyze-run-sheet` console script work) without re-resolving dependencies.
+   `requirements.txt` is the single source of truth for runtime dependencies. `pip install -e .` installs this project itself (so `analyze_run_sheet.py` and the `analyze-run-sheet` console script work).
 
 3. **Set API keys.** Copy `.env.example` to `.env`, then fill in:
 

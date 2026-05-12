@@ -404,7 +404,7 @@ def analyze_tract(
 
 def load_refs_or_die(refs_path: Path):
     """Hard-fail if refs/ is missing or empty."""
-    from doc_embed import RefLibrary
+    from .retrieval import RefLibrary
 
     if not refs_path.exists():
         raise RuntimeError(

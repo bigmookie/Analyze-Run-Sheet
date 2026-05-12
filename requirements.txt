@@ -1,10 +1,5 @@
 # Run Sheet Analyzer — runtime dependencies.
-#
 # Install: pip install -r requirements.txt
-#
-# The companion embeddings library (doc_embed) is not on PyPI; install it
-# separately from the local Embeddings DB Creator project, e.g.:
-#   pip install -e "C:\Users\gardn\Documents\Projects\Embeddings DB Creator"
 
 anthropic>=0.39
 openpyxl>=3.1
@@ -14,3 +9,5 @@ numpy>=1.24
 pydantic>=2.5
 pyyaml>=6.0
 python-dotenv>=1.0
+voyageai>=0.2
+rank-bm25>=0.2.2

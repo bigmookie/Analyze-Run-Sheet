@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 Confidence = Literal["high", "medium", "low"]
 
@@ -96,6 +96,8 @@ class Exceptions(BaseModel):
 
 class TractAnalysis(BaseModel):
     """Combined per-tract output, also the shape of out/<tract>.json."""
+    model_config = ConfigDict(protected_namespaces=())
+
     tract: str
     surface: SurfaceChain
     mineral: MineralChain

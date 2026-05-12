@@ -27,12 +27,15 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
 
    On WSL/macOS/Linux: `source .venv/bin/activate`.
 
-2. **Install this project plus the embeddings library.**
+2. **Install runtime dependencies, this project, and the embeddings library.**
 
    ```powershell
+   pip install -r requirements.txt
    pip install -e .
    pip install -e "C:\Users\gardn\Documents\Projects\Embeddings DB Creator"
    ```
+
+   `requirements.txt` is the single source of truth for runtime dependencies. `pip install -e .` installs this project itself (so `analyze_run_sheet.py` and the `analyze-run-sheet` console script work) without re-resolving dependencies.
 
 3. **Set API keys.** Copy `.env.example` to `.env`, then fill in:
 

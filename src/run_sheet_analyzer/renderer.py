@@ -64,13 +64,14 @@ def _render_owner_line(name: str, share: str, note: str | None) -> str:
 
 
 def _render_exception_line(x: ExceptionItem) -> str:
-    bits = [x.description.rstrip(".")]
-    cite_bits = [f"Book {x.book}, Page {x.page}"]
-    if x.instrument_no:
-        cite_bits.append(f"Inst. No. {x.instrument_no}")
-    if x.recorded:
-        cite_bits.append(f"recorded {x.recorded}")
-    line = bits[0] + " (" + ", ".join(cite_bits) + ")."
+    # The AI's `description` is the full house-style sentence with citation inline.
+    # The book/page/instrument_no/recorded fields stay in the JSON sidecar for
+    # cross-referencing but are not separately rendered into the report.
+    line = x.description.strip()
+    # Append a terminating period only if the sentence doesn't already end with
+    # one (allowing for a closing paren containing a NOTE, e.g. "... heirs.)").
+    if line and line[-1] not in ".!?)\"'":
+        line += "."
     if x.disagreement and x.disagreement_note:
         line += f" [Abstractor flag disagreement: {x.disagreement_note}]"
     return line

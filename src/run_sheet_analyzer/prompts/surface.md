@@ -4,12 +4,12 @@ Construct the **surface chain of title** for tract `{tract_id}` through the Effe
 
 ## Method
 
-1. Identify the **root of title** per MTES Std. 2.02 reaching back at least 32 years (residential) or 50 years (commercial). Acceptable roots: warranty deed (general or special), qualified quitclaim, state patent **excluding** forfeited tax land patents, probate proceeding identifying the property.
+1. Identify the **root of title** per MTES Std. 2.02 reaching back at least 32 years (residential) or 50 years (commercial). Occasionally, the search period will be extended to 100+ years. Assume that the period is 100 years unless instructed otherwise. Acceptable roots: warranty deed (general or special), qualified quitclaim, state patent **excluding** forfeited tax land patents, probate proceeding identifying the property.
 2. Walk forward through every recorded conveyance affecting the surface of this tract.
 3. For each event:
    - Capture the grantors, grantees, document title, book/page, recording date, and a one-sentence summary stating the effect on surface title.
    - Update `cotenants_after` with the fractional shares each owner holds in surface after the event.
-   - Cite any MTES standard or Miss. Code section that controls (e.g., homestead joinder under § 89-1-29 if both spouses signed).
+   - You do not have to cite any MTES standard or Miss. Code section. Those are available just for reverence.
 4. End at the current vesting as of the Effective Date.
 5. Flag in `attorney_review`:
    - Gaps in the chain (grantor in row N does not match grantee in row N−1).

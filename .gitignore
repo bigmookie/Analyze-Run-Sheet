@@ -51,7 +51,12 @@ coverage.xml
 out/
 templates/title-report.docx
 templates/title-report.source.sha256
+# generated research outputs from scripts/research.py and similar
 scripts/research_findings.md
+scripts/ancient_recitals_research.md
+scripts/mineral_types_research.md
+scripts/exceptions_dump.md
+scripts/exceptions_condensed.txt
 
 # Per-job source documents and client data — never commit
 docs/

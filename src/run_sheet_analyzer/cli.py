@@ -1,20 +1,23 @@
-"""Tkinter entry point for the Run Sheet Analyzer.
+"""Command-line entry point for the Run Sheet Analyzer.
 
-Usage:  python analyze_run_sheet.py   (or `analyze-run-sheet` after pip install).
+Usage:
+    python analyze_run_sheet.py
+    python analyze_run_sheet.py "C:\\path\\to\\Run Sheet.xlsx"
+
+The script prompts in the terminal for everything it needs — no GUI dialogs.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import subprocess
 import sys
 import threading
-import tkinter as tk
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 
 import yaml
 
@@ -44,6 +47,11 @@ TEMPLATE_DEST = ROOT / "templates" / "title-report.docx"
 REFS_DIR = ROOT / "refs"
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+
 def _check_env() -> str | None:
     missing = []
     if not os.environ.get("VOYAGE_API_KEY"):
@@ -58,6 +66,29 @@ def _check_env() -> str | None:
     return None
 
 
+def _clean_path(raw: str) -> str:
+    """Strip quoting that PowerShell / drag-and-drop may include."""
+    return raw.strip().strip('"').strip("'")
+
+
+def _prompt(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    val = input(f"  {label}{suffix}: ").strip()
+    return val or default
+
+
+def _confirm(label: str, default_yes: bool = True) -> bool:
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    while True:
+        val = input(f"  {label} {suffix}: ").strip().lower()
+        if not val:
+            return default_yes
+        if val in ("y", "yes"):
+            return True
+        if val in ("n", "no"):
+            return False
+
+
 def _load_job(run_sheet_dir: Path) -> JobConfig:
     job_path = run_sheet_dir / "job.yaml"
     today = date.today().strftime("%B %d, %Y")
@@ -66,7 +97,7 @@ def _load_job(run_sheet_dir: Path) -> JobConfig:
     try:
         data = yaml.safe_load(job_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
-        messagebox.showwarning("job.yaml unreadable", f"Continuing without job config:\n{e}")
+        print(f"WARNING: could not read job.yaml: {e}; continuing without it.", flush=True)
         return JobConfig(signing_date=today)
     return JobConfig(
         effective_date=str(data.get("effective_date", "") or ""),
@@ -78,122 +109,40 @@ def _load_job(run_sheet_dir: Path) -> JobConfig:
     )
 
 
-def _prompt_job_fields(parent, current: JobConfig) -> JobConfig:
-    """If job.yaml was absent or partial, prompt for the certificate fields."""
-    if current.effective_date and current.addressee and current.county:
-        return current
-
-    dlg = tk.Toplevel(parent)
-    dlg.title("Job details")
-    dlg.transient(parent)
-    dlg.grab_set()
-    dlg.resizable(False, False)
-    dlg.lift()
-    dlg.attributes("-topmost", True)
-    dlg.after(50, lambda: dlg.attributes("-topmost", False))
-    dlg.focus_force()
-
-    frm = ttk.Frame(dlg, padding=12)
-    frm.pack(fill="both", expand=True)
-
-    def row(label, default):
-        ttk.Label(frm, text=label).pack(anchor="w")
-        var = tk.StringVar(value=default)
-        ent = ttk.Entry(frm, textvariable=var, width=48)
-        ent.pack(fill="x", pady=(0, 8))
-        return var
-
-    addressee = row("Addressee:", current.addressee or "")
-    effective = row("Effective Date (e.g. March 13, 2026):", current.effective_date or "")
-    county = row("County:", current.county or "Simpson")
-    signing = row("Signing Date:", current.signing_date or date.today().strftime("%B %d, %Y"))
-
-    result = {"ok": False}
-
-    def on_ok():
-        result["ok"] = True
-        dlg.destroy()
-
-    def on_cancel():
-        dlg.destroy()
-
-    btns = ttk.Frame(frm)
-    btns.pack(fill="x", pady=(4, 0))
-    ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=4)
-    ttk.Button(btns, text="OK", command=on_ok).pack(side="right")
-
-    dlg.wait_window()
-
-    if not result["ok"]:
-        return current
+def _prompt_job_fields(current: JobConfig) -> JobConfig:
+    print()
+    print("Job details (press Enter to accept the bracketed default):", flush=True)
+    addressee = _prompt("Addressee", current.addressee or "")
+    effective = _prompt("Effective Date (e.g. March 13, 2026)", current.effective_date or "")
+    county = _prompt("County", current.county or "Simpson")
+    signing = _prompt(
+        "Signing Date",
+        current.signing_date or date.today().strftime("%B %d, %Y"),
+    )
     return JobConfig(
-        effective_date=effective.get(),
-        addressee=addressee.get(),
-        county=county.get(),
+        effective_date=effective,
+        addressee=addressee,
+        county=county,
         state=current.state,
-        signing_date=signing.get(),
+        signing_date=signing,
         parcels=current.parcels,
     )
 
 
-def _confirm_tracts(parent, tract_ids: list[str]) -> list[str] | None:
-    dlg = tk.Toplevel(parent)
-    dlg.title("Confirm tracts to analyze")
-    dlg.transient(parent)
-    dlg.grab_set()
-    dlg.lift()
-    dlg.attributes("-topmost", True)
-    dlg.after(50, lambda: dlg.attributes("-topmost", False))
-    dlg.focus_force()
-
-    ttk.Label(dlg, text="Discovered tracts (uncheck any to skip):", padding=8).pack(anchor="w")
-
-    frm = ttk.Frame(dlg, padding=(8, 0, 8, 0))
-    frm.pack(fill="both", expand=True)
-
-    vars_ = {}
-    for i, tid in enumerate(tract_ids):
-        v = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frm, text=tid, variable=v).grid(row=i // 4, column=i % 4, sticky="w", padx=6, pady=2)
-        vars_[tid] = v
-
-    selected: list[str] | None = [None]   # mutable holder; None means cancelled
-
-    def on_ok():
-        selected[0] = [tid for tid, v in vars_.items() if v.get()]
-        dlg.destroy()
-
-    def on_cancel():
-        selected[0] = None
-        dlg.destroy()
-
-    btns = ttk.Frame(dlg, padding=8)
-    btns.pack(fill="x")
-    ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="right", padx=4)
-    ttk.Button(btns, text="Run", command=on_ok).pack(side="right")
-
-    dlg.wait_window()
-    return selected[0]
-
-
-class ProgressWindow(tk.Toplevel):
-    def __init__(self, parent, title: str = "Analyzing"):
-        super().__init__(parent)
-        self.title(title)
-        self.geometry("800x540")
-        self.transient(parent)
-        frm = ttk.Frame(self, padding=8)
-        frm.pack(fill="both", expand=True)
-        self.text = tk.Text(frm, wrap="word")
-        self.text.pack(fill="both", expand=True)
-        self.text.configure(state="disabled")
-
-    def log(self, line: str):
-        # Always called on the Tk main thread (scheduled via root.after).
-        self.text.configure(state="normal")
-        self.text.insert("end", line + "\n")
-        self.text.see("end")
-        self.text.configure(state="disabled")
+def _prompt_tracts(tract_ids: list[str]) -> list[str]:
+    print()
+    print(f"Discovered {len(tract_ids)} tracts:", flush=True)
+    print("  " + ", ".join(tract_ids), flush=True)
+    raw = input(
+        "  Tracts to SKIP (comma-separated, blank to run all): "
+    ).strip()
+    if not raw:
+        return list(tract_ids)
+    skip = {t.strip() for t in raw.split(",") if t.strip()}
+    unknown = skip - set(tract_ids)
+    if unknown:
+        print(f"  WARNING: unknown tract(s) ignored: {', '.join(sorted(unknown))}", flush=True)
+    return [t for t in tract_ids if t not in skip]
 
 
 def _open_file_native(path: Path) -> None:
@@ -208,17 +157,28 @@ def _open_file_native(path: Path) -> None:
         pass
 
 
-def _bring_to_front(root: tk.Tk) -> None:
-    """Force a Tk dialog parent to the foreground (Windows is fussy about this)."""
-    try:
-        root.attributes("-topmost", True)
-        root.update()
-        root.attributes("-topmost", False)
-    except Exception:
-        pass
+# ──────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Analyze a real-estate run sheet and produce a draft "
+                    "Mississippi title report.",
+    )
+    parser.add_argument(
+        "run_sheet",
+        nargs="?",
+        help="Path to the run sheet .xlsx (if omitted, you'll be prompted).",
+    )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Run all tracts and accept all defaults without prompting.",
+    )
+    args = parser.parse_args()
+
     print(flush=True)
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
@@ -227,41 +187,36 @@ def main() -> int:
     print("=" * 60, flush=True)
     print(flush=True)
 
-    root = tk.Tk()
-    root.withdraw()
-    # Make sure subsequent dialogs aren't stranded behind PowerShell.
-    _bring_to_front(root)
-
     env_err = _check_env()
     if env_err:
         print(f"ERROR: {env_err}", flush=True)
-        messagebox.showerror("Missing API keys", env_err)
         return 1
 
-    print(">> Opening file picker — select your run sheet .xlsx (the dialog "
-          "may be behind PowerShell; check the taskbar).", flush=True)
-    _bring_to_front(root)
-    rs_path = filedialog.askopenfilename(
-        parent=root,
-        title="Select a run sheet (.xlsx)",
-        filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
-    )
-    if not rs_path:
-        print("No file selected; exiting.", flush=True)
+    # Run sheet path
+    if args.run_sheet:
+        rs_path = Path(_clean_path(args.run_sheet))
+    else:
+        raw = input("Path to run sheet .xlsx (drag the file here or paste the path): ")
+        if not raw.strip():
+            print("No file path given; exiting.", flush=True)
+            return 1
+        rs_path = Path(_clean_path(raw))
+
+    if not rs_path.is_file():
+        print(f"ERROR: file not found: {rs_path}", flush=True)
         return 1
-    rs_path = Path(rs_path)
     print(f"Selected: {rs_path}", flush=True)
 
+    # Parse
     print("Parsing run sheet …", flush=True)
     try:
         parsed = parse(rs_path)
     except MissingColumnsError as e:
         print(f"ERROR: {e}", flush=True)
-        messagebox.showerror("Run sheet rejected", str(e))
         return 1
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", flush=True)
-        messagebox.showerror("Could not read run sheet", f"{type(e).__name__}: {e}")
+        traceback.print_exc()
         return 1
     print(f"  {len(parsed.rows)} rows, {len(parsed.tract_ids())} tracts, "
           f"{len(parsed.not_subject_rows)} NS, {len(parsed.unparseable_le_rows)} bare-LE",
@@ -269,87 +224,64 @@ def main() -> int:
 
     if parsed.unparseable_le_rows:
         msg = (
-            f"{len(parsed.unparseable_le_rows)} row(s) tagged as Less-and-Except (LE) "
-            "have no base tract. These rows will be omitted. Continue?"
+            f"  {len(parsed.unparseable_le_rows)} row(s) tagged as Less-and-Except "
+            "have no base tract; they will be omitted."
         )
-        _bring_to_front(root)
-        if not messagebox.askyesno("Unparseable LE rows", msg, parent=root):
-            print("User declined; exiting.", flush=True)
+        print(msg, flush=True)
+        if not args.yes and not _confirm("Continue?", default_yes=True):
+            print("Aborted.", flush=True)
             return 1
 
+    # Reference library
     print("Loading reference libraries …", flush=True)
     try:
         refs_lib = load_refs_or_die(REFS_DIR)
     except RuntimeError as e:
         print(f"ERROR: {e}", flush=True)
-        messagebox.showerror("Reference library missing", str(e))
         return 1
     print(f"  loaded: {', '.join(refs_lib.stats().keys())}", flush=True)
 
+    # Template
     print("Preparing report template …", flush=True)
     ensure_template(TEMPLATE_SOURCE, TEMPLATE_DEST)
 
+    # Job config
     print("Loading job config …", flush=True)
     job = _load_job(rs_path.parent)
-    print(">> Opening job-details dialog (check the taskbar if you don't see it).",
-          flush=True)
-    _bring_to_front(root)
-    job = _prompt_job_fields(root, job)
+    if not args.yes:
+        job = _prompt_job_fields(job)
     if not job.effective_date:
-        print("No effective date supplied; exiting.", flush=True)
-        messagebox.showerror("Cancelled", "An Effective Date is required.")
+        print("ERROR: an Effective Date is required.", flush=True)
         return 1
 
+    # Tract selection
     tract_ids = parsed.tract_ids()
     if not tract_ids:
-        print("ERROR: No tract IDs found in the run sheet.", flush=True)
-        messagebox.showerror("No tracts", "No tract IDs found in the run sheet.")
+        print("ERROR: no tract IDs found in the run sheet.", flush=True)
         return 1
-
-    print(f">> Opening tract-confirmation dialog ({len(tract_ids)} tracts found).",
-          flush=True)
-    _bring_to_front(root)
-    selected = _confirm_tracts(root, tract_ids)
-    if selected is None or not selected:
+    selected = tract_ids if args.yes else _prompt_tracts(tract_ids)
+    if not selected:
         print("No tracts selected; exiting.", flush=True)
         return 1
+    print()
     print(f"Confirmed {len(selected)} tracts: {', '.join(selected)}", flush=True)
 
-    progress = ProgressWindow(root, title=f"Analyzing {rs_path.name}")
-    log_lock = threading.Lock()
-
-    def log(msg: str) -> None:
-        """Write to both the terminal and the Tkinter progress window (thread-safe).
-
-        Tk is not thread-safe; widget mutations are marshaled onto the main
-        thread via root.after(0, ...).
-        """
-        with log_lock:
-            print(msg, flush=True)
-        try:
-            root.after(0, lambda m=msg: progress.log(m))
-        except Exception:
-            pass
-
-    log(f"Run sheet : {rs_path}")
-    log(f"Tracts    : {', '.join(selected)}")
-    log(f"Ref DBs   : {', '.join(refs_lib.stats().keys())}")
-    log("")
-
+    # Run analysis
     out_dir = rs_path.parent / "out"
     out_dir.mkdir(exist_ok=True)
     rebuild = bool(os.environ.get("ANALYZER_REBUILD"))
 
-    # max_retries=0 so our own retry loop in analyzer._create_with_retry
-    # is the one visible to the user. Generous per-call timeout for extended
-    # thinking. timeout=600s; SDK default may be lower.
+    # max_retries=0 so analyzer._create_with_retry owns the retry loop.
     client = anthropic.Anthropic(max_retries=0, timeout=600.0)
-    analyses: dict[str, "analyzer_mod.TractAnalysis"] = {}
+    analyses: dict[str, analyzer_mod.TractAnalysis] = {}
     total_usage: dict[str, TokenUsage] = {}
     state_lock = threading.Lock()
+    log_lock = threading.Lock()
 
-    # Default to 2 parallel workers — keeps load on the Anthropic API low so
-    # overload retries don't stack up. Override via ANALYZER_PARALLEL.
+    def log(msg: str) -> None:
+        with log_lock:
+            print(msg, flush=True)
+
     max_workers = max(1, int(os.environ.get("ANALYZER_PARALLEL", "2")))
     log(f"Parallel workers: {max_workers}")
     log("")
@@ -398,76 +330,70 @@ def main() -> int:
             log(f"[{tid}] FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()
 
-    def worker():
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(process_tract, tid) for tid in selected]
-            for f in as_completed(futures):
-                # Any exception propagates here. process_tract already logs &
-                # swallows per-tract failures, so f.result() is just a join.
-                f.result()
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(process_tract, tid) for tid in selected]
+        for f in as_completed(futures):
+            f.result()
 
-        if not analyses:
-            log("\nNo successful tract analyses. Nothing to render.")
-            return
+    if not analyses:
+        log("\nNo successful tract analyses. Nothing to render.")
+        return 1
 
-        log("\nRendering consolidated report …")
-        ordered = [analyses[tid] for tid in selected if tid in analyses]
-        report_path = rs_path.parent / f"{rs_path.stem} - Draft Report.docx"
-        try:
-            render_report(
-                template_path=TEMPLATE_DEST,
-                output_path=report_path,
-                job=job,
-                analyses=ordered,
-            )
-            cache_mod.save_consolidated(
-                out_dir, rs_path.stem,
-                {
-                    "effective_date": job.effective_date,
-                    "addressee": job.addressee,
-                    "county": job.county,
-                    "signing_date": job.signing_date,
-                },
-                analyses,
-            )
-            log(f"Report written: {report_path}")
+    # Render
+    log("\nRendering consolidated report …")
+    ordered = [analyses[tid] for tid in selected if tid in analyses]
+    report_path = rs_path.parent / f"{rs_path.stem} - Draft Report.docx"
+    try:
+        render_report(
+            template_path=TEMPLATE_DEST,
+            output_path=report_path,
+            job=job,
+            analyses=ordered,
+        )
+        cache_mod.save_consolidated(
+            out_dir, rs_path.stem,
+            {
+                "effective_date": job.effective_date,
+                "addressee": job.addressee,
+                "county": job.county,
+                "signing_date": job.signing_date,
+            },
+            analyses,
+        )
+        log(f"Report written: {report_path}")
+    except Exception as e:
+        traceback.print_exc()
+        log(f"Render FAILED: {type(e).__name__}: {e}")
+        return 1
 
-            # Print token-usage and cost summary.
-            if total_usage:
-                log("")
-                log("─" * 56)
-                log("  Token usage")
-                log("─" * 56)
-                grand_total = 0.0
-                for model in sorted(total_usage):
-                    u = total_usage[model]
-                    cost = u.cost_usd(model)
-                    grand_total += cost
-                    log(f"  {model}")
-                    log(f"    Input (new)  : {u.input_tokens:>12,}")
-                    log(f"    Input (cache): {u.cache_read_tokens:>12,}")
-                    log(f"    Cache writes : {u.cache_write_tokens:>12,}")
-                    log(f"    Output       : {u.output_tokens:>12,}")
-                    log(f"    Subtotal     : ~${cost:.4f}")
-                log("─" * 56)
-                log(f"  TOTAL ESTIMATED COST : ~${grand_total:.4f}")
-                log("  (Voyage AI charges not included)")
-                log("  (Rates may change — verify at console.anthropic.com)")
-                log("─" * 56)
+    # Cost summary
+    if total_usage:
+        log("")
+        log("─" * 56)
+        log("  Token usage")
+        log("─" * 56)
+        grand_total = 0.0
+        for model in sorted(total_usage):
+            u = total_usage[model]
+            cost = u.cost_usd(model)
+            grand_total += cost
+            log(f"  {model}")
+            log(f"    Input (new)  : {u.input_tokens:>12,}")
+            log(f"    Input (cache): {u.cache_read_tokens:>12,}")
+            log(f"    Cache writes : {u.cache_write_tokens:>12,}")
+            log(f"    Output       : {u.output_tokens:>12,}")
+            log(f"    Subtotal     : ~${cost:.4f}")
+        log("─" * 56)
+        log(f"  TOTAL ESTIMATED COST : ~${grand_total:.4f}")
+        log("  (Voyage AI charges not included)")
+        log("  (Rates may change — verify at console.anthropic.com)")
+        log("─" * 56)
 
-            _open_file_native(report_path)
-            messagebox.showinfo(
-                "Done",
-                f"Draft report written to:\n{report_path}\n\n"
-                f"Tracts analyzed: {len(ordered)}",
-            )
-        except Exception as e:
-            traceback.print_exc()
-            log(f"Render FAILED: {type(e).__name__}: {e}")
-            messagebox.showerror("Render failed", f"{type(e).__name__}: {e}")
+    # Offer to open the report
+    if not args.yes and _confirm("\nOpen the report now?", default_yes=True):
+        _open_file_native(report_path)
 
-    threading.Thread(target=worker, daemon=True).start()
-    root.mainloop()
+    log(f"\nDone.  Report: {report_path}")
     return 0
 
 

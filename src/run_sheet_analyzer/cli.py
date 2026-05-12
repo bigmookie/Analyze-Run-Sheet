@@ -30,7 +30,9 @@ import anthropic
 
 from run_sheet_analyzer import analyzer as analyzer_mod
 from run_sheet_analyzer import cache as cache_mod
-from run_sheet_analyzer.analyzer import OPUS, SONNET, JobConfig, analyze_tract, load_refs_or_die
+from run_sheet_analyzer.analyzer import (
+    OPUS, SONNET, TokenUsage, JobConfig, analyze_tract, load_refs_or_die,
+)
 from run_sheet_analyzer.parser import MissingColumnsError, parse
 from run_sheet_analyzer.renderer import render_report
 from run_sheet_analyzer.template_builder import ensure_template
@@ -283,6 +285,16 @@ def main() -> int:
 
     client = anthropic.Anthropic()
     analyses: dict[str, "analyzer_mod.TractAnalysis"] = {}
+    total_usage: dict[str, TokenUsage] = {}
+
+    def _merge_usage(src: dict[str, TokenUsage]) -> None:
+        for model, u in src.items():
+            if model not in total_usage:
+                total_usage[model] = TokenUsage()
+            total_usage[model].input_tokens      += u.input_tokens
+            total_usage[model].output_tokens     += u.output_tokens
+            total_usage[model].cache_write_tokens += u.cache_write_tokens
+            total_usage[model].cache_read_tokens  += u.cache_read_tokens
 
     def worker():
         for tid in selected:
@@ -295,7 +307,7 @@ def main() -> int:
                 continue
             log(f"[{tid}] starting …")
             try:
-                ta = analyze_tract(
+                ta, tract_usage = analyze_tract(
                     client=client,
                     p=parsed,
                     tract=tract,
@@ -303,6 +315,7 @@ def main() -> int:
                     refs_lib=refs_lib,
                     on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
                 )
+                _merge_usage(tract_usage)
                 cache_mod.save(out_dir, ta)
                 analyses[tid] = ta
                 used = ta.model_used
@@ -341,6 +354,30 @@ def main() -> int:
                 analyses,
             )
             log(f"Report written: {report_path}")
+
+            # Print token-usage and cost summary.
+            if total_usage:
+                log("")
+                log("─" * 56)
+                log("  Token usage")
+                log("─" * 56)
+                grand_total = 0.0
+                for model in sorted(total_usage):
+                    u = total_usage[model]
+                    cost = u.cost_usd(model)
+                    grand_total += cost
+                    log(f"  {model}")
+                    log(f"    Input (new)  : {u.input_tokens:>12,}")
+                    log(f"    Input (cache): {u.cache_read_tokens:>12,}")
+                    log(f"    Cache writes : {u.cache_write_tokens:>12,}")
+                    log(f"    Output       : {u.output_tokens:>12,}")
+                    log(f"    Subtotal     : ~${cost:.4f}")
+                log("─" * 56)
+                log(f"  TOTAL ESTIMATED COST : ~${grand_total:.4f}")
+                log("  (Voyage AI charges not included)")
+                log("  (Rates may change — verify at console.anthropic.com)")
+                log("─" * 56)
+
             _open_file_native(report_path)
             messagebox.showinfo(
                 "Done",

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -31,6 +31,46 @@ MAX_TOKENS = 16_000
 THINKING_BUDGET = 8_000
 
 RETRIEVE_K = 8
+
+# Pricing per 1M tokens (USD). Verify current rates at console.anthropic.com.
+_RATES: dict[str, dict[str, float]] = {
+    SONNET: {"input": 3.00,  "output": 15.00, "cache_write": 3.75,  "cache_read": 0.30},
+    OPUS:   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+}
+
+
+@dataclass
+class TokenUsage:
+    """Cumulative token counts for one model across all API calls."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_write_tokens: int = 0   # cache_creation_input_tokens
+    cache_read_tokens: int = 0    # cache_read_input_tokens
+
+    def add(self, response) -> None:
+        u = response.usage
+        self.input_tokens += u.input_tokens
+        self.output_tokens += u.output_tokens
+        self.cache_write_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
+        self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
+
+    def cost_usd(self, model: str) -> float:
+        rates = _RATES.get(model, _RATES[SONNET])
+        return (
+            self.input_tokens      * rates["input"]
+            + self.output_tokens   * rates["output"]
+            + self.cache_write_tokens * rates["cache_write"]
+            + self.cache_read_tokens  * rates["cache_read"]
+        ) / 1_000_000
+
+
+def _acc(usage: dict[str, TokenUsage] | None, model: str, response) -> None:
+    """Accumulate response usage into the per-model dict."""
+    if usage is None:
+        return
+    if model not in usage:
+        usage[model] = TokenUsage()
+    usage[model].add(response)
 
 
 @dataclass
@@ -263,6 +303,7 @@ def _run_area(
     *,
     initial_model: str = SONNET,
     on_progress: Callable[[str], None] | None = None,
+    usage: dict[str, TokenUsage] | None = None,
 ) -> tuple[Any, str, list[dict]]:
     """Send one area turn, parse the response, escalate to Opus on low confidence.
 
@@ -272,6 +313,7 @@ def _run_area(
     if on_progress:
         on_progress(f"  calling {initial_model}...")
     resp = _call(client, system_blocks, messages, initial_model)
+    _acc(usage, initial_model, resp)
     text = _extract_text(resp)
     messages = messages + [{"role": "assistant", "content": text}]
 
@@ -290,6 +332,7 @@ def _run_area(
         }
         messages = messages + [{"role": "user", "content": [retry]}]
         resp = _call(client, system_blocks, messages, initial_model)
+        _acc(usage, initial_model, resp)
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         obj = schema_cls.model_validate(_parse_json(text))
@@ -309,6 +352,7 @@ def _run_area(
         }
         messages = messages + [{"role": "user", "content": [escalate]}]
         resp = _call(client, system_blocks, messages, OPUS)
+        _acc(usage, OPUS, resp)
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         obj = schema_cls.model_validate(_parse_json(text))
@@ -325,8 +369,10 @@ def analyze_tract(
     job: JobConfig,
     refs_lib,
     on_progress: Callable[[str], None] | None = None,
-) -> TractAnalysis:
+) -> tuple[TractAnalysis, dict[str, TokenUsage]]:
     log = on_progress or (lambda s: None)
+    usage: dict[str, TokenUsage] = {}
+
     log(f"Tract {tract.id}: retrieving authorities …")
     refs_text = _retrieve_refs(_tract_retrieval_query(tract), refs_lib)
 
@@ -345,14 +391,14 @@ def analyze_tract(
     surface, surface_model, messages = _run_area(
         client, system_blocks, base_messages,
         _build_task_block("surface.md", tract.id, job),
-        SurfaceChain, on_progress=log,
+        SurfaceChain, on_progress=log, usage=usage,
     )
 
     log(f"Tract {tract.id}: mineral chain …")
     mineral, mineral_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("mineral.md", tract.id, job),
-        MineralChain, on_progress=log,
+        MineralChain, on_progress=log, usage=usage,
     )
 
     # Reconcile mineral fractions; on imbalance, ask Claude to fix.
@@ -374,6 +420,7 @@ def analyze_tract(
         }
         messages = messages + [{"role": "user", "content": [fix]}]
         resp = _call(client, system_blocks, messages, OPUS)
+        _acc(usage, OPUS, resp)
         text = _extract_text(resp)
         messages = messages + [{"role": "assistant", "content": text}]
         mineral = MineralChain.model_validate(_parse_json(text))
@@ -384,10 +431,10 @@ def analyze_tract(
     exceptions, exceptions_model, messages = _run_area(
         client, system_blocks, messages,
         _build_task_block("exceptions.md", tract.id, job),
-        Exceptions, on_progress=log,
+        Exceptions, on_progress=log, usage=usage,
     )
 
-    return TractAnalysis(
+    ta = TractAnalysis(
         tract=tract.id,
         surface=surface,
         mineral=mineral,
@@ -400,6 +447,7 @@ def analyze_tract(
         },
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
+    return ta, usage
 
 
 def load_refs_or_die(refs_path: Path):

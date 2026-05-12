@@ -1,45 +1,47 @@
-"""Per-tract on-disk JSON cache keyed by input hash."""
+"""Per-tract on-disk cache.
+
+Each tract's report section is stored as two files:
+  out/<tract>.txt   — the generated report text
+  out/<tract>.hash  — sha256 of the input rows + job config
+
+On re-run, if the hash matches we reuse the .txt file and skip the API call.
+"""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
-from .models import TractAnalysis
+
+def _hash_inputs(tract, job_dict: dict) -> str:
+    h = hashlib.sha256()
+    h.update(json.dumps(job_dict, sort_keys=True).encode())
+    for row in tract.rows + tract.le_rows:
+        h.update(repr(row).encode())
+    return h.hexdigest()
 
 
-def cache_path(out_dir: Path, tract_id: str) -> Path:
-    return out_dir / f"{tract_id}.json"
+def tract_hash(tract, job_dict: dict) -> str:
+    return _hash_inputs(tract, job_dict)
 
 
-def load(out_dir: Path, tract_id: str, expected_hash: str) -> TractAnalysis | None:
-    p = cache_path(out_dir, tract_id)
-    if not p.exists():
+def load(out_dir: Path, tract_id: str, expected_hash: str) -> str | None:
+    txt = out_dir / f"{tract_id}.txt"
+    hashfile = out_dir / f"{tract_id}.hash"
+    if not txt.exists() or not hashfile.exists():
         return None
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if data.get("input_hash") != expected_hash:
-        return None
-    try:
-        return TractAnalysis.model_validate(data)
+        if hashfile.read_text().strip() != expected_hash:
+            return None
+        return txt.read_text(encoding="utf-8")
     except Exception:
         return None
 
 
-def save(out_dir: Path, ta: TractAnalysis) -> Path:
+def save(out_dir: Path, tract_id: str, text: str, input_hash: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    p = cache_path(out_dir, ta.tract)
-    p.write_text(ta.model_dump_json(indent=2), encoding="utf-8")
-    return p
-
-
-def save_consolidated(out_dir: Path, name: str, job_dict: dict, tracts: dict[str, TractAnalysis]) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    p = out_dir / f"{name}.analysis.json"
-    payload = {
-        "job": job_dict,
-        "tracts": {tid: json.loads(t.model_dump_json()) for tid, t in tracts.items()},
-    }
-    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return p
+    txt = out_dir / f"{tract_id}.txt"
+    hashfile = out_dir / f"{tract_id}.hash"
+    txt.write_text(text, encoding="utf-8")
+    hashfile.write_text(input_hash)
+    return txt

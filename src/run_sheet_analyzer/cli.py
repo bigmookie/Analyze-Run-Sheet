@@ -3,8 +3,6 @@
 Usage:
     python analyze_run_sheet.py
     python analyze_run_sheet.py "C:\\path\\to\\Run Sheet.xlsx"
-
-The script prompts in the terminal for everything it needs — no GUI dialogs.
 """
 from __future__ import annotations
 
@@ -24,7 +22,6 @@ from tkinter import filedialog
 
 import yaml
 
-# Ensure src/ is on path when run as a script.
 ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
@@ -35,11 +32,16 @@ load_dotenv(ROOT / ".env")
 
 import anthropic
 
-from run_sheet_analyzer import analyzer as analyzer_mod
 from run_sheet_analyzer import cache as cache_mod
 from run_sheet_analyzer.analyzer import (
-    OPUS, SONNET, AnalysisInterrupted, TokenUsage, JobConfig,
-    analyze_tract, load_refs_or_die, stop_event,
+    AnalysisInterrupted,
+    JobConfig,
+    OPUS,
+    SONNET,
+    TokenUsage,
+    analyze_tract,
+    load_refs_or_die,
+    stop_event,
 )
 from run_sheet_analyzer.parser import MissingColumnsError, parse
 from run_sheet_analyzer.renderer import render_report
@@ -51,27 +53,16 @@ TEMPLATE_DEST = ROOT / "templates" / "title-report.docx"
 REFS_DIR = ROOT / "refs"
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────
-
-
 def _check_env() -> str | None:
-    missing = []
-    if not os.environ.get("VOYAGE_API_KEY"):
-        missing.append("VOYAGE_API_KEY")
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        missing.append("ANTHROPIC_API_KEY")
-    if missing:
         return (
-            "Missing environment variable(s): " + ", ".join(missing) +
-            ".\n\nCopy .env.example to .env in the project root and fill in your keys."
+            "Missing ANTHROPIC_API_KEY.\n"
+            "Copy .env.example to .env in the project root and set the key."
         )
     return None
 
 
 def _clean_path(raw: str) -> str:
-    """Strip quoting that PowerShell / drag-and-drop may include."""
     return raw.strip().strip('"').strip("'")
 
 
@@ -101,7 +92,7 @@ def _load_job(run_sheet_dir: Path) -> JobConfig:
     try:
         data = yaml.safe_load(job_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
-        print(f"WARNING: could not read job.yaml: {e}; continuing without it.", flush=True)
+        print(f"WARNING: could not read job.yaml: {e}", flush=True)
         return JobConfig(signing_date=today)
     return JobConfig(
         effective_date=str(data.get("effective_date", "") or ""),
@@ -137,9 +128,7 @@ def _prompt_tracts(tract_ids: list[str]) -> list[str]:
     print()
     print(f"Discovered {len(tract_ids)} tracts:", flush=True)
     print("  " + ", ".join(tract_ids), flush=True)
-    raw = input(
-        "  Tracts to SKIP (comma-separated, blank to run all): "
-    ).strip()
+    raw = input("  Tracts to SKIP (comma-separated, blank to run all): ").strip()
     if not raw:
         return list(tract_ids)
     skip = {t.strip() for t in raw.split(",") if t.strip()}
@@ -150,14 +139,8 @@ def _prompt_tracts(tract_ids: list[str]) -> list[str]:
 
 
 def _pick_run_sheet_dialog() -> str | None:
-    """Open a Tk file picker for the run sheet, then destroy the Tk root.
-
-    Tk is used only here; the rest of the program is pure CLI.
-    """
     root = tk.Tk()
     root.withdraw()
-    # Windows: shove the dialog to the foreground so it doesn't get stranded
-    # behind PowerShell.
     try:
         root.attributes("-topmost", True)
         root.update()
@@ -177,14 +160,22 @@ def _pick_run_sheet_dialog() -> str | None:
     return path or None
 
 
+def _open_file_native(path: Path) -> None:
+    try:
+        if platform.system() == "Windows":
+            os.startfile(str(path))   # noqa
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
+    except Exception:
+        pass
+
+
 _ctrl_c_count = 0
 
 
 def _install_interrupt_handler() -> None:
-    """Two-stage Ctrl+C:
-       1st press → drain in-flight work, write any completed reports, exit cleanly.
-       2nd press → immediate force-quit (os._exit).
-    """
     def handler(signum, frame):
         global _ctrl_c_count
         _ctrl_c_count += 1
@@ -204,47 +195,21 @@ def _install_interrupt_handler() -> None:
         pass
 
 
-def _open_file_native(path: Path) -> None:
-    try:
-        if platform.system() == "Windows":
-            os.startfile(str(path))   # noqa
-        elif platform.system() == "Darwin":
-            subprocess.run(["open", str(path)], check=False)
-        else:
-            subprocess.run(["xdg-open", str(path)], check=False)
-    except Exception:
-        pass
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Analyze a real-estate run sheet and produce a draft "
-                    "Mississippi title report.",
+    parser_ = argparse.ArgumentParser(
+        description="Analyze a real-estate run sheet and produce a draft Mississippi title report.",
     )
-    parser.add_argument(
-        "run_sheet",
-        nargs="?",
-        help="Path to the run sheet .xlsx (if omitted, you'll be prompted).",
-    )
-    parser.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        help="Run all tracts and accept all defaults without prompting.",
-    )
-    args = parser.parse_args()
+    parser_.add_argument("run_sheet", nargs="?", help="Path to the run sheet .xlsx.")
+    parser_.add_argument("--yes", "-y", action="store_true",
+                         help="Run all tracts and accept all defaults without prompting.")
+    args = parser_.parse_args()
 
     _install_interrupt_handler()
 
     print(flush=True)
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
-    print(f"  Analysis model  : {SONNET}", flush=True)
-    print(f"  Escalation model: {OPUS}  (on low confidence)", flush=True)
+    print(f"  Model: {SONNET}", flush=True)
     print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)
@@ -254,13 +219,11 @@ def main() -> int:
         print(f"ERROR: {env_err}", flush=True)
         return 1
 
-    # Run sheet path — file dialog by default, CLI arg overrides it.
+    # Run sheet path
     if args.run_sheet:
         rs_path = Path(_clean_path(args.run_sheet))
     else:
         print(">> Opening file picker — select your run sheet .xlsx.", flush=True)
-        print("   (If the dialog doesn't appear, check the taskbar for a Tk window.)",
-              flush=True)
         picked = _pick_run_sheet_dialog()
         if not picked:
             print("No file selected; exiting.", flush=True)
@@ -288,23 +251,10 @@ def main() -> int:
           flush=True)
 
     if parsed.unparseable_le_rows:
-        msg = (
-            f"  {len(parsed.unparseable_le_rows)} row(s) tagged as Less-and-Except "
-            "have no base tract; they will be omitted."
-        )
-        print(msg, flush=True)
+        print(f"  {len(parsed.unparseable_le_rows)} bare-LE rows will be omitted.", flush=True)
         if not args.yes and not _confirm("Continue?", default_yes=True):
             print("Aborted.", flush=True)
             return 1
-
-    # Reference library
-    print("Loading reference libraries …", flush=True)
-    try:
-        refs_lib = load_refs_or_die(REFS_DIR)
-    except RuntimeError as e:
-        print(f"ERROR: {e}", flush=True)
-        return 1
-    print(f"  loaded: {', '.join(refs_lib.stats().keys())}", flush=True)
 
     # Template
     print("Preparing report template …", flush=True)
@@ -331,14 +281,16 @@ def main() -> int:
     print()
     print(f"Confirmed {len(selected)} tracts: {', '.join(selected)}", flush=True)
 
-    # Run analysis
+    # Refs (optional, currently unused by analyzer but loaded for future use)
+    refs_lib = load_refs_or_die(REFS_DIR)
+
     out_dir = rs_path.parent / "out"
     out_dir.mkdir(exist_ok=True)
     rebuild = bool(os.environ.get("ANALYZER_REBUILD"))
 
-    # max_retries=0 so analyzer._create_with_retry owns the retry loop.
     client = anthropic.Anthropic(max_retries=0, timeout=600.0)
-    analyses: dict[str, analyzer_mod.TractAnalysis] = {}
+
+    sections: dict[str, str] = {}
     total_usage: dict[str, TokenUsage] = {}
     state_lock = threading.Lock()
     log_lock = threading.Lock()
@@ -350,6 +302,13 @@ def main() -> int:
     max_workers = max(1, int(os.environ.get("ANALYZER_PARALLEL", "2")))
     log(f"Parallel workers: {max_workers}")
     log("")
+
+    job_dict_for_hash = {
+        "effective_date": job.effective_date,
+        "addressee": job.addressee,
+        "county": job.county,
+        "signing_date": job.signing_date,
+    }
 
     def _merge_usage(src: dict[str, TokenUsage]) -> None:
         with state_lock:
@@ -366,39 +325,37 @@ def main() -> int:
             log(f"[{tid}] skipped (interrupted)")
             return
         tract = parsed.tracts[tid]
-        input_hash = analyzer_mod._tract_hash(tract, parsed, job)
+        input_hash = cache_mod.tract_hash(tract, job_dict_for_hash)
         cached = None if rebuild else cache_mod.load(out_dir, tid, input_hash)
         if cached is not None:
-            log(f"[{tid}] cached — skipping API calls")
+            log(f"[{tid}] cached — skipping API call")
             with state_lock:
-                analyses[tid] = cached
+                sections[tid] = cached
             return
-        log(f"[{tid}] starting …")
+        log(f"[{tid}] starting ({len(tract.rows)} events) …")
         try:
-            ta, tract_usage = analyze_tract(
+            text, usage = analyze_tract(
                 client=client,
-                p=parsed,
                 tract=tract,
+                p=parsed,
                 job=job,
                 refs_lib=refs_lib,
                 on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
-                on_thinking=lambda s, tid=tid: log(f"[{tid}]    ~ {s}"),
             )
-            _merge_usage(tract_usage)
-            cache_mod.save(out_dir, ta)
+            usage_dict = {SONNET: TokenUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+            )}
+            _merge_usage(usage_dict)
+            cache_mod.save(out_dir, tid, text, input_hash)
             with state_lock:
-                analyses[tid] = ta
+                sections[tid] = text
                 cum_cost = sum(u.cost_usd(m) for m, u in total_usage.items())
-                tracts_done = len(analyses)
-                tracts_total = len(selected)
-            used = ta.model_used
-            log(
-                f"[{tid}] done  "
-                f"surface={ta.surface.confidence}/{used.get('surface','?')}  "
-                f"mineral={ta.mineral.confidence}/{used.get('mineral','?')}  "
-                f"exceptions={ta.exceptions.confidence}/{used.get('exceptions','?')}  "
-                f"|  {tracts_done}/{tracts_total} done, cumulative ~${cum_cost:.4f}"
-            )
+                done = len(sections)
+                total = len(selected)
+            log(f"[{tid}] done  ({len(text):,} chars)  |  {done}/{total} done, ~${cum_cost:.4f}")
         except AnalysisInterrupted:
             log(f"[{tid}] interrupted before completion")
         except Exception as e:
@@ -410,42 +367,33 @@ def main() -> int:
         try:
             for f in as_completed(futures):
                 if stop_event.is_set():
-                    # Cancel anything still queued; in-flight calls finish naturally.
                     for pending in futures:
                         pending.cancel()
-                f.result()
+                try:
+                    f.result()
+                except Exception:
+                    pass
         except KeyboardInterrupt:
-            # Belt-and-suspenders: signal handler should have already set stop_event.
             stop_event.set()
             for pending in futures:
                 pending.cancel()
 
     if stop_event.is_set():
-        log("\n!! Run interrupted by user — rendering whatever completed.")
-    if not analyses:
+        log("\n!! Run interrupted — rendering whatever completed.")
+    if not sections:
         log("\nNo successful tract analyses. Nothing to render.")
         return 1
 
     # Render
     log("\nRendering consolidated report …")
-    ordered = [analyses[tid] for tid in selected if tid in analyses]
+    ordered = [(tid, sections[tid]) for tid in selected if tid in sections]
     report_path = rs_path.parent / f"{rs_path.stem} - Draft Report.docx"
     try:
         render_report(
             template_path=TEMPLATE_DEST,
             output_path=report_path,
             job=job,
-            analyses=ordered,
-        )
-        cache_mod.save_consolidated(
-            out_dir, rs_path.stem,
-            {
-                "effective_date": job.effective_date,
-                "addressee": job.addressee,
-                "county": job.county,
-                "signing_date": job.signing_date,
-            },
-            analyses,
+            tract_sections=ordered,
         )
         log(f"Report written: {report_path}")
     except Exception as e:
@@ -472,11 +420,8 @@ def main() -> int:
             log(f"    Subtotal     : ~${cost:.4f}")
         log("─" * 56)
         log(f"  TOTAL ESTIMATED COST : ~${grand_total:.4f}")
-        log("  (Voyage AI charges not included)")
-        log("  (Rates may change — verify at console.anthropic.com)")
         log("─" * 56)
 
-    # Offer to open the report
     if not args.yes and _confirm("\nOpen the report now?", default_yes=True):
         _open_file_native(report_path)
 

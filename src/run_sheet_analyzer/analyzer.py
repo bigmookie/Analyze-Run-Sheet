@@ -28,7 +28,27 @@ SONNET = "claude-sonnet-4-6"
 OPUS = "claude-opus-4-7"
 
 MAX_TOKENS = 16_000
-THINKING_BUDGET = 8_000
+THINKING_BUDGET = 8_000     # Sonnet 4.6-style fixed budget
+
+# Opus 4.7 uses a different thinking-control surface: adaptive thinking +
+# output_config.effort. Map the effort level to use when escalating.
+OPUS_THINKING_EFFORT = "high"
+
+
+def _model_thinking_params(model: str) -> dict:
+    """Return the right thinking/output_config params for the target model.
+
+    Sonnet 4.6 wants thinking={"type":"enabled","budget_tokens":N}.
+    Opus 4.7 wants thinking={"type":"adaptive"} + output_config.effort.
+    """
+    if "opus-4-7" in model:
+        return {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": OPUS_THINKING_EFFORT},
+        }
+    return {
+        "thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET},
+    }
 
 # Defensive limits.
 MAX_TOOL_ITERATIONS = 6        # cap on tool-use loop iterations per area turn
@@ -373,10 +393,10 @@ def _call(
     kwargs = dict(
         model=model,
         max_tokens=MAX_TOKENS,
-        thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
         system=system_blocks,
         messages=messages,
         extra_headers=_CACHE_BETA_HEADER,
+        **_model_thinking_params(model),
     )
     if refs_lib is not None:
         kwargs["tools"] = [SEARCH_AUTHORITY_TOOL]

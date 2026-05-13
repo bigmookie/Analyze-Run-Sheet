@@ -220,7 +220,6 @@ def analyze_tract(
     tract,
     p,                       # ParsedRunSheet (kept for forward-compat / context)
     job: JobConfig,
-    refs_lib=None,           # currently unused; kept for forward-compat
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, TokenUsage]:
     """One Claude call per tract. Returns (report_text, token_usage)."""
@@ -245,16 +244,3 @@ def analyze_tract(
     usage.add(resp)
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
     return text, usage
-
-
-def load_refs_or_die(refs_path: Path):
-    """Optional reference library load. Currently advisory only — the simplified
-    analyzer does not consult refs/ per-call. Kept for forward-compat so the
-    CLI's wiring doesn't break."""
-    try:
-        from .retrieval import RefLibrary
-        if not refs_path.exists():
-            return None
-        return RefLibrary.load(refs_path)
-    except Exception:
-        return None

@@ -36,11 +36,9 @@ from run_sheet_analyzer import cache as cache_mod
 from run_sheet_analyzer.analyzer import (
     AnalysisInterrupted,
     JobConfig,
-    OPUS,
     SONNET,
     TokenUsage,
     analyze_tract,
-    load_refs_or_die,
     stop_event,
 )
 from run_sheet_analyzer.parser import MissingColumnsError, parse
@@ -50,7 +48,6 @@ from run_sheet_analyzer.template_builder import ensure_template
 
 TEMPLATE_SOURCE = ROOT / "Abstract - Report - Minerals.docx"
 TEMPLATE_DEST = ROOT / "templates" / "title-report.docx"
-REFS_DIR = ROOT / "refs"
 
 
 def _check_env() -> str | None:
@@ -281,9 +278,6 @@ def main() -> int:
     print()
     print(f"Confirmed {len(selected)} tracts: {', '.join(selected)}", flush=True)
 
-    # Refs (optional, currently unused by analyzer but loaded for future use)
-    refs_lib = load_refs_or_die(REFS_DIR)
-
     out_dir = rs_path.parent / "out"
     out_dir.mkdir(exist_ok=True)
     rebuild = bool(os.environ.get("ANALYZER_REBUILD"))
@@ -339,7 +333,6 @@ def main() -> int:
                 tract=tract,
                 p=parsed,
                 job=job,
-                refs_lib=refs_lib,
                 on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
             )
             usage_dict = {SONNET: TokenUsage(

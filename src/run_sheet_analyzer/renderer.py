@@ -75,7 +75,7 @@ def _render_tract_section(doc, tract_id: str, text: str, job: JobConfig):
 
     parcel = job.for_tract(tract_id)
     section_bold = {
-        "VESTING", "DESCRIPTION", "EXCEPTIONS", "ATTORNEY REVIEW",
+        "CHAIN OF TITLE", "VESTING", "DESCRIPTION", "EXCEPTIONS", "ATTORNEY REVIEW",
     }
 
     for raw_line in text.splitlines():

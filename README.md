@@ -1,6 +1,6 @@
 # Run Sheet Analyzer
 
-Reads an abstractor's run sheet (Excel) and produces a draft Mississippi title report (Word `.docx`) plus a machine-readable JSON sidecar. Each tract is analyzed by Claude as a sophisticated Mississippi real estate attorney, grounded in MTES and the firm's reference manuals via a Voyage-based embeddings library.
+Reads an abstractor's run sheet (Excel) and produces a draft Mississippi title report (Word `.docx`). Each tract is analyzed by Claude as a sophisticated Mississippi real estate attorney, with the firm's house-style guide and Mississippi title-examination methodology embedded directly in the prompts.
 
 For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setup and day-to-day use.
 
@@ -10,8 +10,6 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
 
 - Python 3.10 or newer.
 - An **Anthropic** API key (for Claude analysis).
-- A **Voyage AI** API key (for embedding retrieval queries).
-- The `refs/` directory populated with at least one reference DB, built using the Embeddings DB Creator project.
 
 ---
 
@@ -34,18 +32,13 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
    pip install -e .
    ```
 
-   `requirements.txt` is the single source of truth for runtime dependencies. `pip install -e .` installs this project itself (so `analyze_run_sheet.py` and the `analyze-run-sheet` console script work).
-
-3. **Set API keys.** Copy `.env.example` to `.env`, then fill in:
+3. **Set the API key.** Copy `.env.example` to `.env` and fill in:
 
    ```
-   VOYAGE_API_KEY=vyg-...
    ANTHROPIC_API_KEY=sk-ant-...
    ```
 
-4. **Make sure `refs/` is populated.** The analyzer hard-fails if no reference DBs are present. Use the Embeddings DB Creator's `create_embeddings_db.py` to build at least one DB into this project's `refs/` directory.
-
-5. **Confirm the firm template is in the project root.** The renderer reads `Abstract - Report - Minerals.docx` from the root and regenerates `templates/title-report.docx` automatically whenever the source changes.
+4. **Confirm the firm template is in the project root.** The renderer reads `Abstract - Report - Minerals.docx` from the root and regenerates `templates/title-report.docx` automatically whenever the source changes.
 
 ---
 

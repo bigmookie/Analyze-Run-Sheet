@@ -125,14 +125,40 @@ def _prompt_tracts(tract_ids: list[str]) -> list[str]:
     print()
     print(f"Discovered {len(tract_ids)} tracts:", flush=True)
     print("  " + ", ".join(tract_ids), flush=True)
-    raw = input("  Tracts to SKIP (comma-separated, blank to run all): ").strip()
+    print("  Enter tract IDs to RUN (comma-separated), or prefix with '-' to EXCLUDE.", flush=True)
+    print("  Blank = run all.", flush=True)
+    raw = input("  > ").strip()
     if not raw:
         return list(tract_ids)
-    skip = {t.strip() for t in raw.split(",") if t.strip()}
-    unknown = skip - set(tract_ids)
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    # If any token starts with '-', treat the whole line as an exclude list.
+    if any(t.startswith("-") for t in tokens):
+        skip = {t.lstrip("-").strip() for t in tokens}
+        unknown = skip - set(tract_ids)
+        if unknown:
+            print(f"  WARNING: unknown tract(s) ignored: {', '.join(sorted(unknown))}", flush=True)
+        return [t for t in tract_ids if t not in skip]
+    # Otherwise it's an include list — preserve the run-sheet order.
+    requested = set(tokens)
+    unknown = requested - set(tract_ids)
     if unknown:
         print(f"  WARNING: unknown tract(s) ignored: {', '.join(sorted(unknown))}", flush=True)
-    return [t for t in tract_ids if t not in skip]
+    return [t for t in tract_ids if t in requested]
+
+
+def _parse_tracts_arg(arg: str, all_tracts: list[str]) -> tuple[list[str], list[str]]:
+    """Apply the same include/exclude rules from --tracts as from the prompt.
+    Returns (selected, unknown)."""
+    tokens = [t.strip() for t in arg.split(",") if t.strip()]
+    if not tokens:
+        return list(all_tracts), []
+    if any(t.startswith("-") for t in tokens):
+        skip = {t.lstrip("-").strip() for t in tokens}
+        unknown = sorted(skip - set(all_tracts))
+        return [t for t in all_tracts if t not in skip], unknown
+    requested = set(tokens)
+    unknown = sorted(requested - set(all_tracts))
+    return [t for t in all_tracts if t in requested], unknown
 
 
 def _pick_run_sheet_dialog() -> str | None:
@@ -199,6 +225,15 @@ def main() -> int:
     parser_.add_argument("run_sheet", nargs="?", help="Path to the run sheet .xlsx.")
     parser_.add_argument("--yes", "-y", action="store_true",
                          help="Run all tracts and accept all defaults without prompting.")
+    parser_.add_argument(
+        "--tracts",
+        help=(
+            "Tract IDs to analyze, comma-separated. Examples: "
+            "'23.1,23.2,26.4' (only these), or "
+            "'-22.1,-22.2' (all except these). "
+            "Skips the interactive tract prompt."
+        ),
+    )
     args = parser_.parse_args()
 
     _install_interrupt_handler()
@@ -271,7 +306,16 @@ def main() -> int:
     if not tract_ids:
         print("ERROR: no tract IDs found in the run sheet.", flush=True)
         return 1
-    selected = tract_ids if args.yes else _prompt_tracts(tract_ids)
+    if args.tracts:
+        selected, unknown = _parse_tracts_arg(args.tracts, tract_ids)
+        if unknown:
+            print(f"ERROR: unknown tract(s) in --tracts: {', '.join(unknown)}", flush=True)
+            print(f"  Known tracts: {', '.join(tract_ids)}", flush=True)
+            return 1
+    elif args.yes:
+        selected = tract_ids
+    else:
+        selected = _prompt_tracts(tract_ids)
     if not selected:
         print("No tracts selected; exiting.", flush=True)
         return 1

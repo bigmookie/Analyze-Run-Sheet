@@ -25,7 +25,8 @@ import anthropic
 SONNET = "claude-sonnet-4-6"
 OPUS = "claude-opus-4-7"
 
-MAX_TOKENS = 8_000           # generous for the report section (~3-5K tokens typical)
+MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
+MAX_CONTINUATIONS = 4        # if the model still hits max_tokens, keep asking it to continue
 MAX_API_RETRIES = 5
 RETRY_BACKOFF_BASE = 3.0
 
@@ -222,25 +223,58 @@ def analyze_tract(
     job: JobConfig,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, TokenUsage]:
-    """One Claude call per tract. Returns (report_text, token_usage)."""
+    """One Claude call per tract, with automatic continuation if the model hits
+    max_tokens before finishing. Returns (report_text, token_usage)."""
     log = on_progress or (lambda s: None)
     usage = TokenUsage()
 
     _check_stop()
     user_prompt = _build_tract_prompt(tract.id, tract.rows, tract.le_rows, job)
+    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    system_blocks = [{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}]
+    accumulated = ""
 
-    log(f"calling {SONNET}...")
-    resp = _create_with_retry(
-        client,
-        kwargs=dict(
-            model=SONNET,
-            max_tokens=MAX_TOKENS,
-            system=[{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}],
-            messages=[{"role": "user", "content": user_prompt}],
-            extra_headers=_CACHE_BETA_HEADER,
-        ),
-        on_progress=log,
-    )
-    usage.add(resp)
-    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-    return text, usage
+    for attempt in range(1 + MAX_CONTINUATIONS):
+        _check_stop()
+        if attempt == 0:
+            log(f"calling {SONNET}...")
+        else:
+            log(f"output truncated; requesting continuation #{attempt} …")
+            messages = messages + [
+                {"role": "assistant", "content": accumulated},
+                {"role": "user", "content": (
+                    "The previous response was cut off at the model output limit. "
+                    "Continue from exactly where you stopped. Do NOT add a preamble, "
+                    "do NOT repeat any content, do NOT restate context. Resume from "
+                    "the exact word or punctuation where the prior turn ended, "
+                    "even if mid-sentence."
+                )},
+            ]
+
+        resp = _create_with_retry(
+            client,
+            kwargs=dict(
+                model=SONNET,
+                max_tokens=MAX_TOKENS,
+                system=system_blocks,
+                messages=messages,
+                extra_headers=_CACHE_BETA_HEADER,
+            ),
+            on_progress=log,
+        )
+        usage.add(resp)
+        chunk = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        accumulated += chunk
+
+        if resp.stop_reason != "max_tokens":
+            break
+    else:
+        # Used all continuation attempts and still got max_tokens. Surface a
+        # visible note in the output rather than silently truncating.
+        log(f"WARNING: still truncated after {MAX_CONTINUATIONS} continuations")
+        accumulated += (
+            "\n\n*** ATTORNEY REVIEW — REPORT TRUNCATED: model hit output cap "
+            f"after {MAX_CONTINUATIONS} continuation attempts. ***"
+        )
+
+    return accumulated.strip(), usage

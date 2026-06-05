@@ -4,6 +4,8 @@ Below are every recorded instrument affecting tract `{tract_id}`, in chronologic
 
 **Effective Date:** {effective_date}
 
+{commentary}
+
 ## Events for tract {tract_id}
 
 {events}

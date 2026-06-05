@@ -161,6 +161,41 @@ def _parse_tracts_arg(arg: str, all_tracts: list[str]) -> tuple[list[str], list[
     return [t for t in all_tracts if t in requested], unknown
 
 
+def _gather_commentary(args) -> str:
+    """Resolve commentary from flags or an interactive prompt.
+
+      --no-commentary  → skip entirely (returns "").
+      --commentary T   → use T verbatim (no prompt).
+      --yes            → no prompt; returns "" unless --commentary given.
+      otherwise        → ask whether to provide commentary; if yes, collect
+                         multi-line input terminated by a blank line.
+    """
+    if args.no_commentary:
+        return ""
+    if args.commentary:
+        return args.commentary.strip()
+    if args.yes:
+        return ""
+    print()
+    if not _confirm("Provide commentary/instructions for the AI before analysis?",
+                    default_yes=False):
+        return ""
+    print("  Type your commentary. Press Enter on a blank line to finish.", flush=True)
+    lines: list[str] = []
+    while True:
+        try:
+            line = input("  | ")
+        except EOFError:
+            break
+        if line.strip() == "":
+            break
+        lines.append(line)
+    commentary = "\n".join(lines).strip()
+    if commentary:
+        print(f"  Commentary captured ({len(commentary)} chars).", flush=True)
+    return commentary
+
+
 def _pick_run_sheet_dialog() -> str | None:
     root = tk.Tk()
     root.withdraw()
@@ -233,6 +268,16 @@ def main() -> int:
             "'-22.1,-22.2' (all except these). "
             "Skips the interactive tract prompt."
         ),
+    )
+    parser_.add_argument(
+        "--commentary",
+        help="Commentary/instructions for the AI, applied to every tract. "
+             "Providing this skips the interactive commentary prompt.",
+    )
+    parser_.add_argument(
+        "--no-commentary",
+        action="store_true",
+        help="Skip the commentary step entirely (no prompt, no commentary).",
     )
     args = parser_.parse_args()
 
@@ -322,6 +367,9 @@ def main() -> int:
     print()
     print(f"Confirmed {len(selected)} tracts: {', '.join(selected)}", flush=True)
 
+    # Optional examiner commentary / instructions for the AI.
+    commentary = _gather_commentary(args)
+
     out_dir = rs_path.parent / "out"
     out_dir.mkdir(exist_ok=True)
     rebuild = bool(os.environ.get("ANALYZER_REBUILD"))
@@ -346,6 +394,7 @@ def main() -> int:
         "addressee": job.addressee,
         "county": job.county,
         "signing_date": job.signing_date,
+        "commentary": commentary,
     }
 
     def _merge_usage(src: dict[str, TokenUsage]) -> None:
@@ -377,6 +426,7 @@ def main() -> int:
                 tract=tract,
                 p=parsed,
                 job=job,
+                commentary=commentary,
                 on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
             )
             usage_dict = {SONNET: TokenUsage(

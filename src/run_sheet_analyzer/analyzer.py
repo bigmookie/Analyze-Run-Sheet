@@ -129,7 +129,9 @@ def _format_event(row, idx: int) -> str:
     return "\n".join(parts)
 
 
-def _build_tract_prompt(tract_id: str, rows: list, le_rows: list, job: JobConfig) -> str:
+def _build_tract_prompt(
+    tract_id: str, rows: list, le_rows: list, job: JobConfig, commentary: str = ""
+) -> str:
     """Filter + sort + format the prompt for one tract."""
     sorted_rows = sorted(rows, key=lambda r: (r.date_recorded or date(1800, 1, 1)))
     events_text = "\n\n".join(_format_event(r, i + 1) for i, r in enumerate(sorted_rows)) or "_None._"
@@ -143,10 +145,22 @@ def _build_tract_prompt(tract_id: str, rows: list, le_rows: list, job: JobConfig
         job_context_parts.append(f"Parcel ID for this tract: {parcel.get('parcel_id', '—')}")
     job_context = "\n".join(job_context_parts)
 
+    if commentary.strip():
+        commentary_block = (
+            "# Examiner commentary and instructions (HIGH PRIORITY)\n\n"
+            "The examining attorney has provided the following commentary and/or "
+            "instructions for this analysis. Follow them carefully; where they "
+            "conflict with a general rule, the examiner's instructions control:\n\n"
+            f"{commentary.strip()}"
+        )
+    else:
+        commentary_block = ""
+
     template = _load_prompt("tract.md")
     return template.format(
         tract_id=tract_id,
         effective_date=job.effective_date or "<not provided>",
+        commentary=commentary_block,
         events=events_text,
         le_rows=le_text,
         job_context=job_context,
@@ -221,6 +235,7 @@ def analyze_tract(
     tract,
     p,                       # ParsedRunSheet (kept for forward-compat / context)
     job: JobConfig,
+    commentary: str = "",
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, TokenUsage]:
     """One Claude call per tract, with automatic continuation if the model hits
@@ -229,7 +244,7 @@ def analyze_tract(
     usage = TokenUsage()
 
     _check_stop()
-    user_prompt = _build_tract_prompt(tract.id, tract.rows, tract.le_rows, job)
+    user_prompt = _build_tract_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
     messages: list[dict] = [{"role": "user", "content": user_prompt}]
     system_blocks = [{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}]
     accumulated = ""

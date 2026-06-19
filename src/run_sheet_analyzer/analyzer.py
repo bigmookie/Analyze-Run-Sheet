@@ -85,6 +85,12 @@ class JobConfig:
     state: str = "Mississippi"
     signing_date: str = ""
     parcels: dict[str, dict] = field(default_factory=dict)
+    # Used only when the run sheet's Tract column is blank: the units the examiner
+    # wants to group rows into (or a legal-description file to read them from),
+    # and the granularity of typed units.
+    tracts: list[str] = field(default_factory=list)
+    tract_granularity: str = ""
+    description_file: str = ""
 
     def for_tract(self, tract_id: str) -> dict:
         return self.parcels.get(tract_id, {}) if self.parcels else {}

@@ -22,8 +22,8 @@ from typing import Callable
 import anthropic
 
 
-SONNET = "claude-sonnet-4-6"
-OPUS = "claude-opus-4-7"
+SONNET = "claude-sonnet-4-6"          # surface chain, description, exceptions, assembly
+OPUS = "claude-opus-4-8"              # mineral chain analysis (more complex)
 
 MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
 MAX_CONTINUATIONS = 4        # if the model still hits max_tokens, keep asking it to continue
@@ -36,8 +36,8 @@ _CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
 # Pricing per 1M tokens (USD) — verify at console.anthropic.com.
 _RATES: dict[str, dict[str, float]] = {
-    SONNET: {"input": 3.00,  "output": 15.00, "cache_write": 3.75,  "cache_read": 0.30},
-    OPUS:   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    SONNET: {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+    OPUS:   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
 }
 
 
@@ -75,6 +75,11 @@ class TokenUsage:
             + self.cache_write_tokens * rates["cache_write"]
             + self.cache_read_tokens  * rates["cache_read"]
         ) / 1_000_000
+
+
+def _acc(usage_by_model: dict, model: str, response) -> None:
+    """Accumulate one response's token usage into the per-model dict."""
+    usage_by_model.setdefault(model, TokenUsage()).add(response)
 
 
 @dataclass
@@ -135,13 +140,47 @@ def _format_event(row, idx: int) -> str:
     return "\n".join(parts)
 
 
-def _build_tract_prompt(
-    tract_id: str, rows: list, le_rows: list, job: JobConfig, commentary: str = ""
-) -> str:
-    """Filter + sort + format the prompt for one tract."""
+def _commentary_block(commentary: str) -> str:
+    if not commentary.strip():
+        return ""
+    return (
+        "# Examiner commentary and instructions (HIGH PRIORITY)\n\n"
+        "The examining attorney has provided the following commentary and/or "
+        "instructions for this analysis. Follow them carefully; where they "
+        "conflict with a general rule, the examiner's instructions control:\n\n"
+        f"{commentary.strip()}"
+    )
+
+
+def _events_blocks(rows: list, le_rows: list):
     sorted_rows = sorted(rows, key=lambda r: (r.date_recorded or date(1800, 1, 1)))
     events_text = "\n\n".join(_format_event(r, i + 1) for i, r in enumerate(sorted_rows)) or "_None._"
     le_text = "\n\n".join(_format_event(r, i + 1) for i, r in enumerate(le_rows)) or "_None._"
+    return events_text, le_text
+
+
+def _build_mineral_prompt(
+    tract_id: str, rows: list, le_rows: list, job: JobConfig, commentary: str = ""
+) -> str:
+    """Prompt for the Opus mineral-chain analysis (minerals only)."""
+    events_text, le_text = _events_blocks(rows, le_rows)
+    template = _load_prompt("mineral.md")
+    return template.format(
+        tract_id=tract_id,
+        effective_date=job.effective_date or "<not provided>",
+        commentary=_commentary_block(commentary),
+        events=events_text,
+        le_rows=le_text,
+    )
+
+
+def _build_tract_prompt(
+    tract_id: str, rows: list, le_rows: list, job: JobConfig,
+    commentary: str = "", mineral_analysis: str = "",
+) -> str:
+    """Prompt for the Sonnet full-report assembly. The mineral analysis from the
+    Opus phase is supplied verbatim for the assembler to fold in."""
+    events_text, le_text = _events_blocks(rows, le_rows)
     parcel = job.for_tract(tract_id)
     job_context_parts = [
         f"Addressee: {job.addressee or '—'}",
@@ -151,25 +190,17 @@ def _build_tract_prompt(
         job_context_parts.append(f"Parcel ID for this tract: {parcel.get('parcel_id', '—')}")
     job_context = "\n".join(job_context_parts)
 
-    if commentary.strip():
-        commentary_block = (
-            "# Examiner commentary and instructions (HIGH PRIORITY)\n\n"
-            "The examining attorney has provided the following commentary and/or "
-            "instructions for this analysis. Follow them carefully; where they "
-            "conflict with a general rule, the examiner's instructions control:\n\n"
-            f"{commentary.strip()}"
-        )
-    else:
-        commentary_block = ""
+    mineral_block = (mineral_analysis or "").strip() or "_No mineral analysis provided._"
 
     template = _load_prompt("tract.md")
     return template.format(
         tract_id=tract_id,
         effective_date=job.effective_date or "<not provided>",
-        commentary=commentary_block,
+        commentary=_commentary_block(commentary),
         events=events_text,
         le_rows=le_text,
         job_context=job_context,
+        mineral_analysis=mineral_block,
     )
 
 
@@ -235,6 +266,71 @@ def _create_with_retry(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+_CONTINUE_PROMPT = (
+    "The previous response was cut off at the model output limit. "
+    "Continue from exactly where you stopped. Do NOT add a preamble, "
+    "do NOT repeat any content, do NOT restate context. Resume from "
+    "the exact word or punctuation where the prior turn ended, "
+    "even if mid-sentence."
+)
+
+
+def _generate(
+    client: anthropic.Anthropic,
+    model: str,
+    system_blocks: list[dict],
+    user_prompt: str,
+    usage_by_model: dict,
+    log: Callable[[str], None],
+    *,
+    thinking: bool = False,
+) -> str:
+    """Run one model to completion, auto-continuing if it hits max_tokens.
+    Accumulates token usage into usage_by_model[model]. Returns the text."""
+    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    accumulated = ""
+
+    for attempt in range(1 + MAX_CONTINUATIONS):
+        _check_stop()
+        if attempt == 0:
+            log(f"calling {model} …")
+        else:
+            log(f"output truncated; continuation #{attempt} ({model}) …")
+            messages = messages + [
+                {"role": "assistant", "content": accumulated},
+                {"role": "user", "content": _CONTINUE_PROMPT},
+            ]
+
+        kwargs = dict(
+            model=model,
+            max_tokens=MAX_TOKENS,
+            system=system_blocks,
+            messages=messages,
+            extra_headers=_CACHE_BETA_HEADER,
+        )
+        if thinking:
+            # Opus 4.8 uses adaptive thinking; effort via extra_body keeps this
+            # compatible with older anthropic SDK builds that don't type output_config.
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["extra_body"] = {"output_config": {"effort": "high"}}
+
+        resp = _create_with_retry(client, kwargs, log)
+        _acc(usage_by_model, model, resp)
+        chunk = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        accumulated += chunk
+
+        if resp.stop_reason != "max_tokens":
+            break
+    else:
+        log(f"WARNING: still truncated after {MAX_CONTINUATIONS} continuations ({model})")
+        accumulated += (
+            "\n\n*** ATTORNEY REVIEW — SECTION TRUNCATED: model hit output cap "
+            f"after {MAX_CONTINUATIONS} continuation attempts. ***"
+        )
+
+    return accumulated.strip()
+
+
 def analyze_tract(
     *,
     client: anthropic.Anthropic,
@@ -243,59 +339,31 @@ def analyze_tract(
     job: JobConfig,
     commentary: str = "",
     on_progress: Callable[[str], None] | None = None,
-) -> tuple[str, TokenUsage]:
-    """One Claude call per tract, with automatic continuation if the model hits
-    max_tokens before finishing. Returns (report_text, token_usage)."""
+) -> tuple[str, dict]:
+    """Two-phase per-tract analysis:
+
+      1. Mineral chain — Opus 4.8 (more complex; adaptive thinking). Produces a
+         concise mineral-vesting / mineral-exception block.
+      2. Full report — Sonnet 4.6. Assembles CHAIN OF TITLE, surface vesting,
+         description, and exceptions, folding in the Opus mineral block verbatim.
+
+    Returns (report_text, usage_by_model) where usage_by_model maps each model
+    id to its TokenUsage.
+    """
     log = on_progress or (lambda s: None)
-    usage = TokenUsage()
-
-    _check_stop()
-    user_prompt = _build_tract_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
-    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    usage: dict[str, TokenUsage] = {}
     system_blocks = [{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}]
-    accumulated = ""
 
-    for attempt in range(1 + MAX_CONTINUATIONS):
-        _check_stop()
-        if attempt == 0:
-            log(f"calling {SONNET}...")
-        else:
-            log(f"output truncated; requesting continuation #{attempt} …")
-            messages = messages + [
-                {"role": "assistant", "content": accumulated},
-                {"role": "user", "content": (
-                    "The previous response was cut off at the model output limit. "
-                    "Continue from exactly where you stopped. Do NOT add a preamble, "
-                    "do NOT repeat any content, do NOT restate context. Resume from "
-                    "the exact word or punctuation where the prior turn ended, "
-                    "even if mid-sentence."
-                )},
-            ]
+    # Phase 1 — mineral chain on Opus.
+    log("mineral chain analysis (Opus) …")
+    mineral_prompt = _build_mineral_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
+    mineral_text = _generate(client, OPUS, system_blocks, mineral_prompt, usage, log, thinking=True)
 
-        resp = _create_with_retry(
-            client,
-            kwargs=dict(
-                model=SONNET,
-                max_tokens=MAX_TOKENS,
-                system=system_blocks,
-                messages=messages,
-                extra_headers=_CACHE_BETA_HEADER,
-            ),
-            on_progress=log,
-        )
-        usage.add(resp)
-        chunk = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-        accumulated += chunk
+    # Phase 2 — full report on Sonnet, given the Opus mineral analysis.
+    log("assembling report (Sonnet) …")
+    report_prompt = _build_tract_prompt(
+        tract.id, tract.rows, tract.le_rows, job, commentary, mineral_text
+    )
+    report_text = _generate(client, SONNET, system_blocks, report_prompt, usage, log)
 
-        if resp.stop_reason != "max_tokens":
-            break
-    else:
-        # Used all continuation attempts and still got max_tokens. Surface a
-        # visible note in the output rather than silently truncating.
-        log(f"WARNING: still truncated after {MAX_CONTINUATIONS} continuations")
-        accumulated += (
-            "\n\n*** ATTORNEY REVIEW — REPORT TRUNCATED: model hit output cap "
-            f"after {MAX_CONTINUATIONS} continuation attempts. ***"
-        )
-
-    return accumulated.strip(), usage
+    return report_text, usage

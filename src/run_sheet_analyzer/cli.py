@@ -37,6 +37,7 @@ from run_sheet_analyzer import cache as cache_mod
 from run_sheet_analyzer.analyzer import (
     AnalysisInterrupted,
     JobConfig,
+    OPUS,
     SONNET,
     TokenUsage,
     analyze_tract,
@@ -445,7 +446,8 @@ def main() -> int:
     print(flush=True)
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
-    print(f"  Model: {SONNET}", flush=True)
+    print(f"  Mineral chain : {OPUS}", flush=True)
+    print(f"  Report assembly: {SONNET}", flush=True)
     print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)
@@ -619,7 +621,7 @@ def main() -> int:
             return
         log(f"[{tid}] starting ({len(tract.rows)} events) …")
         try:
-            text, usage = analyze_tract(
+            text, usage_by_model = analyze_tract(
                 client=client,
                 tract=tract,
                 p=parsed,
@@ -627,13 +629,7 @@ def main() -> int:
                 commentary=commentary,
                 on_progress=lambda s, tid=tid: log(f"[{tid}] {s}"),
             )
-            usage_dict = {SONNET: TokenUsage(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_write_tokens=usage.cache_write_tokens,
-                cache_read_tokens=usage.cache_read_tokens,
-            )}
-            _merge_usage(usage_dict)
+            _merge_usage(usage_by_model)
             cache_mod.save(out_dir, tid, text, input_hash)
             with state_lock:
                 sections[tid] = text

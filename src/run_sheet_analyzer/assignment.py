@@ -21,9 +21,15 @@ from pathlib import Path
 from typing import Callable
 
 import anthropic
+import openpyxl
 
 from run_sheet_analyzer import analyzer
-from run_sheet_analyzer.parser import ParsedRunSheet, RunSheetRow, Tract
+from run_sheet_analyzer.parser import (
+    ParsedRunSheet,
+    RunSheetRow,
+    Tract,
+    _build_header_map,
+)
 
 
 @dataclass
@@ -221,3 +227,43 @@ def apply_assignment(parsed: ParsedRunSheet, mapping: dict[int, list[str]]) -> l
         for tid in ids:
             parsed.tracts.setdefault(tid, Tract(id=tid)).rows.append(row)
     return unassigned
+
+
+def write_assigned_run_sheet(
+    src_path: str | Path, parsed: ParsedRunSheet, dest_path: str | Path
+) -> Path:
+    """Write a copy of the run sheet with the Tract column filled from the
+    assignment. The original file is not modified.
+
+    Each row's assigned tract ids are joined with ", " (the run sheet's
+    multi-tract convention) and written into the existing Tract column at the
+    row's original worksheet position. Unassigned rows are left blank.
+    """
+    src_path = Path(src_path)
+    dest_path = Path(dest_path)
+
+    wb = openpyxl.load_workbook(src_path)  # keep formatting/formulas
+    ws = wb[wb.sheetnames[0]]
+
+    # Locate the header row (first non-blank row) and the Tract column.
+    header_row = None
+    for r in range(1, ws.max_row + 1):
+        rowvals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        if any(c is not None and str(c).strip() for c in rowvals):
+            header_row = rowvals
+            break
+    if header_row is None:
+        raise ValueError("Run sheet has no header row to locate the Tract column.")
+
+    req, _opt = _build_header_map(header_row)
+    if "tract" not in req:
+        raise ValueError("Could not find the Tract column to fill.")
+    tract_col = req["tract"] + 1  # openpyxl is 1-based
+
+    for row in parsed.rows:
+        joined = ", ".join(row.tracts)
+        ws.cell(row=row.row_index, column=tract_col).value = joined or None
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(dest_path)
+    return dest_path

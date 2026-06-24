@@ -553,6 +553,15 @@ def main() -> int:
             return 1
         print(f"  Assigned rows into {len(tract_ids)} tract(s): {', '.join(tract_ids)}", flush=True)
 
+        # Write a copy of the run sheet with the Tract column filled in.
+        assigned_path = rs_path.parent / f"{rs_path.stem} - Tracts Assigned.xlsx"
+        try:
+            assignment.write_assigned_run_sheet(rs_path, parsed, assigned_path)
+            print(f"  Tract-assigned run sheet written: {assigned_path}", flush=True)
+        except Exception as e:
+            print(f"  WARNING: could not write tract-assigned run sheet: "
+                  f"{type(e).__name__}: {e}", flush=True)
+
     if args.tracts:
         selected, unknown = _parse_tracts_arg(args.tracts, tract_ids)
         if unknown:

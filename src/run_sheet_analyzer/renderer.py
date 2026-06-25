@@ -17,6 +17,15 @@ from .analyzer import JobConfig
 
 CALLOUT_RED = RGBColor(0xC0, 0x00, 0x00)
 
+# Shown on the certificate when a job field is left blank, so the examiner can
+# find-and-fill them in the generated .docx.
+_PLACEHOLDERS = {
+    "addressee": "[ADDRESSEE]",
+    "effective_date": "[EFFECTIVE DATE]",
+    "county": "[COUNTY]",
+    "signing_date": "[SIGNING DATE]",
+}
+
 
 def _add_heading_run(doc, text: str, size: int = 14):
     p = doc.add_paragraph()
@@ -127,10 +136,10 @@ def render_report(
     # Certificate page from the prepared template.
     tpl = DocxTemplate(str(template_path))
     tpl.render({
-        "addressee": job.addressee or "",
-        "effective_date": job.effective_date or "",
-        "county": job.county or "",
-        "signing_date": job.signing_date or "",
+        "addressee": job.addressee or _PLACEHOLDERS["addressee"],
+        "effective_date": job.effective_date or _PLACEHOLDERS["effective_date"],
+        "county": job.county or _PLACEHOLDERS["county"],
+        "signing_date": job.signing_date or _PLACEHOLDERS["signing_date"],
     })
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tpl.save(str(output_path))

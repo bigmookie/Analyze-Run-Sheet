@@ -16,7 +16,6 @@ import threading
 import tkinter as tk
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
 from pathlib import Path
 from tkinter import filedialog
 
@@ -85,14 +84,13 @@ def _confirm(label: str, default_yes: bool = True) -> bool:
 
 def _load_job(run_sheet_dir: Path) -> JobConfig:
     job_path = run_sheet_dir / "job.yaml"
-    today = date.today().strftime("%B %d, %Y")
     if not job_path.exists():
-        return JobConfig(signing_date=today)
+        return JobConfig()
     try:
         data = yaml.safe_load(job_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
         print(f"WARNING: could not read job.yaml: {e}", flush=True)
-        return JobConfig(signing_date=today)
+        return JobConfig()
     raw_tracts = data.get("tracts") or []
     tracts = [str(t).strip() for t in raw_tracts if str(t).strip()] if isinstance(raw_tracts, list) else []
     return JobConfig(
@@ -100,24 +98,24 @@ def _load_job(run_sheet_dir: Path) -> JobConfig:
         addressee=str(data.get("addressee", "") or ""),
         county=str(data.get("county", "") or ""),
         state=str(data.get("state", "Mississippi") or "Mississippi"),
-        signing_date=str(data.get("signing_date", today) or today),
+        signing_date=str(data.get("signing_date", "") or ""),
         parcels=data.get("parcels") or {},
         tracts=tracts,
         tract_granularity=str(data.get("tract_granularity", "") or ""),
         description_file=str(data.get("description_file", "") or ""),
+        include_minerals=bool(data.get("include_minerals", True)),
     )
 
 
 def _prompt_job_fields(current: JobConfig) -> JobConfig:
     print()
-    print("Job details (press Enter to accept the bracketed default):", flush=True)
+    print("Job details (press Enter to leave a field blank — a placeholder goes in the report):",
+          flush=True)
     addressee = _prompt("Addressee", current.addressee or "")
     effective = _prompt("Effective Date (e.g. March 13, 2026)", current.effective_date or "")
-    county = _prompt("County", current.county or "Simpson")
-    signing = _prompt(
-        "Signing Date",
-        current.signing_date or date.today().strftime("%B %d, %Y"),
-    )
+    county = _prompt("County", current.county or "")
+    signing = _prompt("Signing Date", current.signing_date or "")
+    include_minerals = _confirm("Include mineral analysis?", default_yes=current.include_minerals)
     return JobConfig(
         effective_date=effective,
         addressee=addressee,
@@ -128,6 +126,7 @@ def _prompt_job_fields(current: JobConfig) -> JobConfig:
         tracts=current.tracts,
         tract_granularity=current.tract_granularity,
         description_file=current.description_file,
+        include_minerals=include_minerals,
     )
 
 
@@ -439,6 +438,12 @@ def main() -> int:
         action="store_true",
         help="Skip the commentary step entirely (no prompt, no commentary).",
     )
+    parser_.add_argument(
+        "--no-minerals",
+        action="store_true",
+        help="Exclude minerals: skip the mineral-chain (Opus) phase and produce a "
+             "surface-only report. Overrides job.yaml and the interactive prompt.",
+    )
     args = parser_.parse_args()
 
     _install_interrupt_handler()
@@ -503,9 +508,14 @@ def main() -> int:
     job = _load_job(rs_path.parent)
     if not args.yes:
         job = _prompt_job_fields(job)
+    # --no-minerals wins over job.yaml and the interactive prompt.
+    if args.no_minerals:
+        job.include_minerals = False
     if not job.effective_date:
-        print("ERROR: an Effective Date is required.", flush=True)
-        return 1
+        print("WARNING: no Effective Date provided; '[EFFECTIVE DATE]' will appear in the report.",
+              flush=True)
+    if not job.include_minerals:
+        print("Minerals EXCLUDED — surface-only report (mineral chain phase skipped).", flush=True)
 
     client = anthropic.Anthropic(max_retries=0, timeout=600.0)
 
@@ -604,6 +614,7 @@ def main() -> int:
         "county": job.county,
         "signing_date": job.signing_date,
         "commentary": commentary,
+        "include_minerals": job.include_minerals,
     }
 
     def _merge_usage(src: dict[str, TokenUsage]) -> None:

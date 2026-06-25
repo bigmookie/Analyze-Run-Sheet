@@ -96,6 +96,9 @@ class JobConfig:
     tracts: list[str] = field(default_factory=list)
     tract_granularity: str = ""
     description_file: str = ""
+    # When False, the mineral-chain (Opus) phase is skipped and the report covers
+    # surface title only — no mineral vesting line, no mineral leases section.
+    include_minerals: bool = True
 
     def for_tract(self, tract_id: str) -> dict:
         return self.parcels.get(tract_id, {}) if self.parcels else {}
@@ -174,12 +177,47 @@ def _build_mineral_prompt(
     )
 
 
+def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
+    """The mineral portion injected into the assembler prompt.
+
+    Included → hand the Opus mineral block to the assembler to fold in verbatim.
+    Excluded → instruct a surface-only report that omits all mineral content.
+    """
+    if not include_minerals:
+        return (
+            "## Minerals — EXCLUDED (surface title only)\n\n"
+            "This report covers **surface title only**. Do NOT analyze or mention "
+            "the mineral estate. Specifically:\n"
+            "- In VESTING, omit the `Minerals:` line entirely (output only `Surface:`).\n"
+            "- Omit the `Mineral Leases` exceptions section entirely. The EXCEPTIONS "
+            "sections are therefore: 1. Voluntary Liens, 2. Involuntary Liens, "
+            "3. Servitudes, 4. Other Matters of Record, 5. County Taxes.\n"
+            "- Do not add mineral reservations, severances, or leases to any section, "
+            "and do not raise mineral issues under ATTORNEY REVIEW."
+        )
+    block = (mineral_analysis or "").strip() or "_No mineral analysis provided._"
+    return (
+        "## Mineral chain analysis (already completed — use verbatim)\n\n"
+        "A separate, more thorough mineral-estate analysis has already been "
+        "performed for this tract. **Do not redo the mineral fractional analysis.** "
+        "Incorporate the block below as follows:\n\n"
+        "- Use its **MINERAL VESTING** text as the `Minerals:` line under VESTING, verbatim.\n"
+        "- Place its **MINERAL EXCEPTIONS** items under Exceptions bucket 4 (Other Matters of Record).\n"
+        "- Place its **MINERAL LEASES** items under Exceptions bucket 5 (Mineral Leases).\n"
+        "- Fold its **MINERAL ATTORNEY REVIEW** items into your ATTORNEY REVIEW section.\n"
+        "- Use the supplied mineral analysis for everything about the mineral estate "
+        "(do not recompute fractions).\n\n"
+        f"```\n{block}\n```"
+    )
+
+
 def _build_tract_prompt(
     tract_id: str, rows: list, le_rows: list, job: JobConfig,
     commentary: str = "", mineral_analysis: str = "",
 ) -> str:
     """Prompt for the Sonnet full-report assembly. The mineral analysis from the
-    Opus phase is supplied verbatim for the assembler to fold in."""
+    Opus phase is supplied verbatim for the assembler to fold in (or, when
+    minerals are excluded, a surface-only instruction replaces it)."""
     events_text, le_text = _events_blocks(rows, le_rows)
     parcel = job.for_tract(tract_id)
     job_context_parts = [
@@ -190,8 +228,6 @@ def _build_tract_prompt(
         job_context_parts.append(f"Parcel ID for this tract: {parcel.get('parcel_id', '—')}")
     job_context = "\n".join(job_context_parts)
 
-    mineral_block = (mineral_analysis or "").strip() or "_No mineral analysis provided._"
-
     template = _load_prompt("tract.md")
     return template.format(
         tract_id=tract_id,
@@ -200,7 +236,7 @@ def _build_tract_prompt(
         events=events_text,
         le_rows=le_text,
         job_context=job_context,
-        mineral_analysis=mineral_block,
+        mineral_section=_mineral_section(mineral_analysis, job.include_minerals),
     )
 
 
@@ -354,10 +390,14 @@ def analyze_tract(
     usage: dict[str, TokenUsage] = {}
     system_blocks = [{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}]
 
-    # Phase 1 — mineral chain on Opus.
-    log("mineral chain analysis (Opus) …")
-    mineral_prompt = _build_mineral_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
-    mineral_text = _generate(client, OPUS, system_blocks, mineral_prompt, usage, log, thinking=True)
+    # Phase 1 — mineral chain on Opus (skipped entirely when minerals excluded).
+    mineral_text = ""
+    if job.include_minerals:
+        log("mineral chain analysis (Opus) …")
+        mineral_prompt = _build_mineral_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
+        mineral_text = _generate(client, OPUS, system_blocks, mineral_prompt, usage, log, thinking=True)
+    else:
+        log("minerals excluded — surface-only report")
 
     # Phase 2 — full report on Sonnet, given the Opus mineral analysis.
     log("assembling report (Sonnet) …")

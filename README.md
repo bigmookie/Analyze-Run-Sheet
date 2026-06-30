@@ -169,7 +169,7 @@ Run Sheet Analyzer/
 
 A 15-tract run sheet of typical complexity:
 
-- Claude (Sonnet 4.6 with extended thinking, occasional Opus 4.7 escalation): **$1–3**.
+- Claude (Sonnet 5 with adaptive thinking, occasional Opus 4.8 escalation): **$1–3**.
 - Voyage retrieval + reranking: **a few cents**.
 
 Per-tract input is ~50K tokens on the first turn (system prompt + run sheet + tract context + retrieved standards). Subsequent area turns within the same tract reuse the cached prefix at ~10% of normal input cost.

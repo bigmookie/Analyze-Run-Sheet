@@ -157,12 +157,12 @@ For each tract, one Claude conversation:
 - **User message 4 — minerals:** "Construct the **mineral chain of title** for tract `<id>` **from sovereignty (the original land patent)** through the Effective Date. Use your surface chain as the spine; surface conveyances carry minerals unless severed. Track every reservation and mineral conveyance with **Fraction** arithmetic; reconcile total mineral interest at the Effective Date to exactly 1. Output the per-owner fractional table. Forfeited tax land patents do not sever minerals from a separately-assessed mineral estate. Return JSON per `mineral_chain.schema`."
 - **User message 5 — exceptions:** "Identify all **title exceptions** affecting tract `<id>` at the Effective Date, grouped into six buckets per the firm's report template: (1) Voluntary Liens, (2) Involuntary Liens, (3) Servitudes, (4) Other Matters of Record, (5) Mineral Leases, (6) County Taxes. Apply MS-specific time-bars: unreleased deeds of trust whose underlying note is barred by SOL (6 yrs negotiable; 3 yrs pre-2012 / 6 yrs post non-negotiable per MTES Std. 6.05 & Miss. Code §§ 75-3-118, 15-1-49) may be treated as extinguished; explain when you do. Evaluate Document Title, Notes, and the Exception column together; do not rely on any single signal. Where the abstractor's flags disagree with your analysis, include both and mark `disagreement: true`. Return JSON per `exceptions.schema`."
 
-If any area returns `confidence: low`, the pipeline re-asks that area with model bumped from Sonnet 4.6 → Opus 4.7 (same conversation continues, so prior turns provide context; the model parameter is updated on the new request).
+If any area returns `confidence: low`, the pipeline re-asks that area with model bumped from Sonnet 5 → Opus 4.8 (same conversation continues, so prior turns provide context; the model parameter is updated on the new request).
 
 ### 6.2 Model & caching
 
-- Default model: `claude-sonnet-4-6` with extended thinking enabled (`thinking: { type: "enabled", budget_tokens: 8000 }`).
-- Escalation model: `claude-opus-4-7` (1M context).
+- Default model: `claude-sonnet-5` with adaptive thinking enabled (`thinking: { type: "adaptive" }`, `output_config.effort: "high"`).
+- Escalation model: `claude-opus-4-8` (1M context).
 - Prompt caching: system prompt + the full run-sheet markdown table get `cache_control: ephemeral`. The full run sheet is cached **once per process run** and reused across all tracts in the same invocation. Per-tract user messages are not cached.
 
 ### 6.3 Output schemas (JSON, condensed)
@@ -504,7 +504,7 @@ Any field that the job config or analysis didn't fill is rendered as an empty st
       "mineral": { /* mineral_chain.schema */ },
       "exceptions": { /* exceptions.schema */ },
       "input_hash": "sha256:...",
-      "model_used": { "surface": "sonnet-4-6", "mineral": "sonnet-4-6", "exceptions": "opus-4-7" },
+      "model_used": { "surface": "sonnet-5", "mineral": "sonnet-5", "exceptions": "opus-4-8" },
       "generated_at": "2026-05-11T12:34:56Z"
     }
   }

@@ -22,7 +22,7 @@ from typing import Callable
 import anthropic
 
 
-SONNET = "claude-sonnet-4-6"          # surface chain, description, exceptions, assembly
+SONNET = "claude-sonnet-5"            # surface chain, description, exceptions, assembly
 OPUS = "claude-opus-4-8"              # mineral chain analysis (more complex)
 
 MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
@@ -35,6 +35,7 @@ _CACHE_LONG = {"type": "ephemeral", "ttl": "1h"}
 _CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
 # Pricing per 1M tokens (USD) — verify at console.anthropic.com.
+# Sonnet 5 list price is $3/$15 (introductory $2/$10 per MTok through 2026-08-31).
 _RATES: dict[str, dict[str, float]] = {
     SONNET: {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     OPUS:   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
@@ -345,8 +346,9 @@ def _generate(
             extra_headers=_CACHE_BETA_HEADER,
         )
         if thinking:
-            # Opus 4.8 uses adaptive thinking; effort via extra_body keeps this
-            # compatible with older anthropic SDK builds that don't type output_config.
+            # Adaptive thinking + high effort (both Opus 4.8 and Sonnet 5). effort via
+            # extra_body keeps this compatible with older anthropic SDK builds that
+            # don't type output_config.
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["extra_body"] = {"output_config": {"effort": "high"}}
 
@@ -380,8 +382,9 @@ def analyze_tract(
 
       1. Mineral chain — Opus 4.8 (more complex; adaptive thinking). Produces a
          concise mineral-vesting / mineral-exception block.
-      2. Full report — Sonnet 4.6. Assembles CHAIN OF TITLE, surface vesting,
-         description, and exceptions, folding in the Opus mineral block verbatim.
+      2. Full report — Sonnet 5 (adaptive thinking). Assembles CHAIN OF TITLE,
+         surface vesting, description, and exceptions, folding in the Opus
+         mineral block verbatim.
 
     Returns (report_text, usage_by_model) where usage_by_model maps each model
     id to its TokenUsage.
@@ -404,6 +407,8 @@ def analyze_tract(
     report_prompt = _build_tract_prompt(
         tract.id, tract.rows, tract.le_rows, job, commentary, mineral_text
     )
-    report_text = _generate(client, SONNET, system_blocks, report_prompt, usage, log)
+    report_text = _generate(
+        client, SONNET, system_blocks, report_prompt, usage, log, thinking=True
+    )
 
     return report_text, usage

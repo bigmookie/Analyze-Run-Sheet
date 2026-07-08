@@ -83,18 +83,23 @@ Your work product is an abstractor's report — a description of every matter of
 
 Use this exact structure. Plain text — no JSON, no markdown code fences. Use the headings exactly as written so the renderer can find them.
 
+Work through the full chain of title internally to determine vesting and every
+matter of record — but **do NOT output a chain-of-title section.** Begin the
+report at VESTING.
+
 ```
 === TRACT <tract_id> ===
 
-CHAIN OF TITLE
-<Numbered list of every conveyance/event affecting this tract, oldest first. EXACTLY one line per event — never a paragraph. Use this form:>
-1. [YYYY-MM-DD] <Document Title>, <Grantor(s)> to <Grantee(s)>, Book X at Page Y — <brief effect clause (≈25 words max): note only a reservation, partial conveyance, recital relied upon, gap, or defect. Do not restate the legal description.>
-2. ...
-N. ...
-
 VESTING
-Surface: <one-line statement of surface vesting; identify the vesting deed, e.g. "Title to the surface estate is vested in Jane Doe by Warranty Deed recorded January 1, 2025, in Book 150 at Page 1.">
-Minerals: <one-line statement of mineral vesting with fractional shares and citations to the instrument that created each share, e.g. "Title to the mineral estate is vested in Jane Doe (1/2, as surface owner) by Reservation in that Warranty Deed recorded in Book 100 at Page 2, and R. F. Reed (1/2) by Mineral Right and Royalty Transfer recorded in Book 110 at Page 3."  If mineral fractions don't reconcile to 1, end the line with ` [MINERAL RECONCILIATION ISSUE: <describe>]`.>
+
+Surface
+- <Holder(s)> (<fraction; omit the parenthetical if a sole 1/1 owner>) — <Document Title recorded <Month D, YYYY>, Book X at Page Y>
+- <one line per distinct surface owner; if the title is held by an entity through named trustees/officers, keep them on the one bullet>
+
+Minerals
+- <Holder> (<fraction>) — <brief basis and citation, e.g. "reservation in Warranty Deed, Book 100 at Page 2">
+- <one holder per line — never combine multiple holders on one line>
+Total <sum> — reconciles.    <If the fractions do not reconcile to 1, instead write: Total <sum> — MINERAL RECONCILIATION ISSUE: <describe>.>
 
 DESCRIPTION
 <Base legal description as one paragraph. Then one paragraph per LESS AND EXCEPT clause, each citing the source Book/Page or Instrument No. of the carve-out.>
@@ -116,12 +121,13 @@ EXCEPTIONS
 5. Mineral Leases:
 - <every active OGML and its assignments/ratifications/extensions, or "None.">
 
-6. County Taxes:
-[See parcel data from job config; the renderer fills this in.]
-
 ATTORNEY REVIEW
 - <one issue per line; omit the whole block if nothing to flag>
 ```
+
+Each interest holder in VESTING must be on its own `- ` line. Keep each bullet to
+a single logical statement; do not merge holders. Do not output a County Taxes
+section.
 
 # Style guide — exception phrasing
 

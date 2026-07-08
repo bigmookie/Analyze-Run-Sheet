@@ -31,7 +31,10 @@ Plain text, no preamble, no markdown fences. Use these exact headings so the ass
 
 ```
 MINERAL VESTING:
-<One concise statement of current mineral-estate ownership with each owner's fractional share and the instrument that created it, citing Book X at Page Y or Instrument No. Example: "Title to the mineral estate is vested in Jane Doe (1/2, as surface owner) by reservation in the Warranty Deed recorded Book 100 at Page 2, and R. F. Reed (1/2) by Mineral Right and Royalty Transfer recorded Book 110 at Page 3." If the fractions cannot be reconciled to 1, end with [MINERAL RECONCILIATION ISSUE: <brief description>].>
+- <Holder> (<fraction>) — <brief basis and citation, e.g. "as surface owner; Book 100 at Page 2" or "Mineral Right and Royalty Transfer, Book 110 at Page 3">
+- <one holder per line — never combine multiple holders on one line>
+Total <sum> — reconciles.
+<If the fractions cannot be reconciled to 1, replace the Total line with: Total <sum> — MINERAL RECONCILIATION ISSUE: <brief description>.>
 
 MINERAL EXCEPTIONS:
 - <Each outstanding mineral reservation, severance, NPRI, ORRI, term-mineral, or executive-right severance affecting title, one per line, with citation. Or "None.">

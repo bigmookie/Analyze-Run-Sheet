@@ -25,7 +25,7 @@ Below are every recorded instrument affecting tract `{tract_id}`, in chronologic
 Assemble the report section for tract `{tract_id}` per the output format in your system prompt. Begin with `=== TRACT {tract_id} ===` and end without commentary.
 
 Requirements:
-- The CHAIN OF TITLE comes first and lists **every event above, oldest first**. One line per instrument. Each line must include the recording date, document title, grantor, grantee, and Book/Page (or Instrument No.), plus a **brief** effect clause. Keep each entry to a single line — do not write a paragraph per instrument.
-- Determine the **surface** vesting and the legal description yourself.
+- Work through the chain of title **internally** from the events above to determine vesting and every matter of record, but **do NOT output a chain-of-title section** — begin the report at VESTING.
+- Determine the **surface** vesting and the legal description yourself. In VESTING, put **each interest holder on its own `- ` line** (never combine holders on one line).
 - Handle the mineral estate exactly as instructed in the "Minerals" section above.
 - Be concise throughout: convey the necessary facts without over-explaining.

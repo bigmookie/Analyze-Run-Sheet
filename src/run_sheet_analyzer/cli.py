@@ -615,6 +615,9 @@ def main() -> int:
         "signing_date": job.signing_date,
         "commentary": commentary,
         "include_minerals": job.include_minerals,
+        # Bump when the prompt/report format changes so cached analyses re-run
+        # instead of rendering in the old format.
+        "report_format": "v2-no-chain-bulleted-vesting",
     }
 
     def _merge_usage(src: dict[str, TokenUsage]) -> None:

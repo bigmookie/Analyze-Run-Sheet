@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 from docxtpl import DocxTemplate
 
 from .analyzer import JobConfig
@@ -35,95 +35,102 @@ def _add_heading_run(doc, text: str, size: int = 14):
     return p
 
 
-def _add_paragraph(doc, text: str, *, bold: bool = False, italic: bool = False, color=None):
+def _add_paragraph(
+    doc, text: str, *,
+    bold: bool = False, italic: bool = False, color=None, size: int | None = None,
+    space_before: int = 0, space_after: int = 4,
+    left_indent: float | None = None, hanging: float | None = None,
+):
+    """Add one formatted paragraph. Spacing is in points; indents in inches.
+    Whitespace is controlled by paragraph spacing, not blank paragraphs."""
     p = doc.add_paragraph()
     r = p.add_run(text)
     r.bold = bold
     r.italic = italic
     if color is not None:
         r.font.color.rgb = color
+    if size is not None:
+        r.font.size = Pt(size)
+    pf = p.paragraph_format
+    pf.space_before = Pt(space_before)
+    pf.space_after = Pt(space_after)
+    if left_indent is not None:
+        pf.left_indent = Inches(left_indent)
+    if hanging is not None:
+        pf.first_line_indent = Inches(-hanging)
     return p
 
 
-def _render_county_taxes(doc, tract_id: str, parcel: dict):
-    """The model is told to leave 6. County Taxes for the renderer; we fill it
-    from job config."""
-    _add_paragraph(doc, "6. County Taxes:", bold=True)
-    parcel_id = parcel.get("parcel_id", "")
-    last_year = parcel.get("last_year", "")
-    amount = parcel.get("amount", "")
-    priors_paid = parcel.get("priors_paid", False)
-    if parcel_id:
-        _add_paragraph(doc, f"Parcel ID: {parcel_id}")
-    if last_year and amount:
-        _add_paragraph(doc, f"{last_year} Taxes Paid in the Amount of {amount}")
-    if priors_paid:
-        _add_paragraph(doc, "Priors paid")
-    if not parcel:
-        _add_paragraph(
-            doc,
-            f"ATTORNEY REVIEW — tax data not supplied for tract {tract_id} in job.yaml.",
-            bold=True, color=CALLOUT_RED,
-        )
+# Top-level report sections, rendered as bold headings with space above.
+_SECTION_HEADS = {"VESTING", "DESCRIPTION", "EXCEPTIONS", "ATTORNEY REVIEW"}
+# VESTING sub-labels, rendered bold (accepted with or without a trailing colon).
+_SUB_LABELS = {"Surface", "Minerals"}
 
 
 def _render_tract_section(doc, tract_id: str, text: str, job: JobConfig):
     """Render one tract's report section into the doc.
 
-    The model produces a plain-text section in the firm's house style. We
-    dump it line by line, applying basic formatting:
-      - Lines that look like section headers ("VESTING", "DESCRIPTION",
-        "EXCEPTIONS", "ATTORNEY REVIEW", numbered bucket headers) get bold.
-      - Lines starting with "ATTORNEY REVIEW" or "NOTE:" or "*** " get red.
-      - The bracketed "[See parcel data ...]" placeholder is replaced with
-        the actual tax block from job config.
-      - Everything else renders as a normal paragraph.
+    The model produces a plain-text section in the firm's house style. We format
+    it for readability:
+      - Section headings (VESTING, DESCRIPTION, EXCEPTIONS, ATTORNEY REVIEW):
+        bold, larger, with space above.
+      - Sub-labels (Surface, Minerals): bold.
+      - Numbered subsection headers (e.g. "1. Voluntary Liens (...):"): bold.
+      - Bullet lines ("- " / "• "): real bullets with a hanging indent.
+      - The minerals "Total ..." reconciliation line: italic, indented.
+      - Truncation callouts ("*** "): red bold.
+    Blank input lines are dropped; whitespace comes from paragraph spacing.
     """
     doc.add_page_break()
     _add_heading_run(doc, f"TITLE REPORT — Tract {tract_id}", size=14)
 
-    parcel = job.for_tract(tract_id)
-    section_bold = {
-        "CHAIN OF TITLE", "VESTING", "DESCRIPTION", "EXCEPTIONS", "ATTORNEY REVIEW",
-    }
-
     for raw_line in text.splitlines():
-        line = raw_line.rstrip()
+        stripped = raw_line.strip()
 
-        # Skip the model's "=== TRACT X ===" header — we render our own heading.
-        if line.startswith("=== TRACT") and line.endswith("==="):
+        # Skip blanks (spacing is handled per-paragraph) and the model's header.
+        if not stripped:
+            continue
+        if stripped.startswith("=== TRACT") and stripped.endswith("==="):
             continue
 
-        # Replace the tax-block placeholder with rendered tax info.
-        if "[See parcel data" in line:
-            _render_county_taxes(doc, tract_id, parcel)
+        # Defensively drop County Taxes — removed from the report. Guards against
+        # stale cached output or model drift that still emits it.
+        if stripped.endswith("County Taxes:") or "[See parcel data" in stripped:
             continue
 
-        if not line.strip():
-            doc.add_paragraph("")
+        # Section headings.
+        if stripped in _SECTION_HEADS:
+            _add_paragraph(doc, stripped, bold=True, size=13, space_before=12, space_after=4)
             continue
 
-        stripped = line.strip()
-
-        # Section headers
-        if stripped in section_bold:
-            _add_paragraph(doc, stripped, bold=True)
+        # VESTING sub-labels (Surface / Minerals), with or without a colon.
+        if stripped.rstrip(":") in _SUB_LABELS:
+            _add_paragraph(doc, stripped.rstrip(":"), bold=True, space_before=6, space_after=2)
             continue
 
-        # Numbered bucket headers (e.g. "1. Voluntary Liens (...):")
-        if stripped[:2].rstrip(".").isdigit() and stripped.rstrip().endswith(":"):
-            _add_paragraph(doc, stripped, bold=True)
+        # Numbered subsection headers (e.g. "1. Voluntary Liens (...):").
+        if stripped[:2].rstrip(".").isdigit() and stripped.endswith(":"):
+            _add_paragraph(doc, stripped, bold=True, space_before=8, space_after=2)
             continue
 
-        # Attorney-review / callout lines render in red bold.
-        if stripped.startswith("ATTORNEY REVIEW") or stripped.startswith("*** "):
-            _add_paragraph(doc, stripped, bold=True, color=CALLOUT_RED)
+        # Truncation callout.
+        if stripped.startswith("*** "):
+            _add_paragraph(doc, stripped, bold=True, color=CALLOUT_RED, space_before=4)
             continue
 
-        # Inline NOTE: keep regular formatting but italicize the NOTE portion?
-        # Simple: render as plain paragraph; the "NOTE:" prefix is visible
-        # enough in the firm's style.
-        doc.add_paragraph(stripped)
+        # Bullet lines → real bullet with hanging indent.
+        if stripped.startswith("- ") or stripped.startswith("• "):
+            item = stripped[2:].strip()
+            _add_paragraph(doc, f"• {item}", left_indent=0.35, hanging=0.2, space_after=3)
+            continue
+
+        # Minerals reconciliation line.
+        if stripped.startswith("Total "):
+            _add_paragraph(doc, stripped, italic=True, left_indent=0.2, space_before=2, space_after=4)
+            continue
+
+        # Everything else (e.g. DESCRIPTION paragraphs).
+        _add_paragraph(doc, stripped, space_after=4)
 
 
 def render_report(

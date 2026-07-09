@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from docx import Document
@@ -140,6 +141,14 @@ def render_report(
     job: JobConfig,
     tract_sections: list[tuple[str, str]],   # [(tract_id, report_text), ...]
 ) -> Path:
+    # Build the whole document in memory, then write to disk exactly once.
+    # Writing the destination twice (tpl.save → reopen → doc.save) is fragile
+    # in cloud-synced folders (Dropbox/OneDrive): the sync client memory-maps
+    # the file created by the first save to hash/upload it, and the second
+    # save's truncating reopen then fails with OSError errno 22 (Windows
+    # ERROR_USER_MAPPED_FILE). A single create-write closes that window.
+    buffer = io.BytesIO()
+
     # Certificate page from the prepared template.
     tpl = DocxTemplate(str(template_path))
     tpl.render({
@@ -148,12 +157,13 @@ def render_report(
         "county": job.county or _PLACEHOLDERS["county"],
         "signing_date": job.signing_date or _PLACEHOLDERS["signing_date"],
     })
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tpl.save(str(output_path))
+    tpl.save(buffer)
 
     # Append per-tract sections.
-    doc = Document(str(output_path))
+    buffer.seek(0)
+    doc = Document(buffer)
     for tract_id, text in tract_sections:
         _render_tract_section(doc, tract_id, text, job)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return output_path

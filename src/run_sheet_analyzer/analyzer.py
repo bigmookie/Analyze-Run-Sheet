@@ -22,8 +22,8 @@ from typing import Callable
 import anthropic
 
 
-SONNET = "claude-sonnet-5"            # surface chain, description, exceptions, assembly
-OPUS = "claude-opus-4-8"              # mineral chain analysis (more complex)
+SONNET = "claude-sonnet-5"            # tract reading in assignment.py
+OPUS = "claude-opus-4-8"              # mineral chain + full report assembly
 
 MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
 MAX_CONTINUATIONS = 4        # if the model still hits max_tokens, keep asking it to continue
@@ -405,13 +405,13 @@ def analyze_tract(
     else:
         log("minerals excluded — surface-only report")
 
-    # Phase 2 — full report on Sonnet, given the Opus mineral analysis.
-    log("assembling report (Sonnet) …")
+    # Phase 2 — full report on Opus, given the Opus mineral analysis.
+    log("assembling report (Opus) …")
     report_prompt = _build_tract_prompt(
         tract.id, tract.rows, tract.le_rows, job, commentary, mineral_text
     )
     report_text = _generate(
-        client, SONNET, system_blocks, report_prompt, usage, log, thinking=True
+        client, OPUS, system_blocks, report_prompt, usage, log, thinking=True
     )
 
     return report_text, usage

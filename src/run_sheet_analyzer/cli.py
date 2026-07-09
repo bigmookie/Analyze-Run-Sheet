@@ -37,7 +37,6 @@ from run_sheet_analyzer.analyzer import (
     AnalysisInterrupted,
     JobConfig,
     OPUS,
-    SONNET,
     TokenUsage,
     analyze_tract,
     stop_event,
@@ -452,7 +451,7 @@ def main() -> int:
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
     print(f"  Mineral chain : {OPUS}", flush=True)
-    print(f"  Report assembly: {SONNET}", flush=True)
+    print(f"  Report assembly: {OPUS}", flush=True)
     print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)

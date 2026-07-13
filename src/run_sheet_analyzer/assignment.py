@@ -90,7 +90,7 @@ def _message(client: anthropic.Anthropic, prompt: str, log: Callable[[str], None
     return analyzer._create_with_retry(
         client,
         kwargs=dict(
-            model=analyzer.SONNET,
+            model=analyzer.OPUS,
             max_tokens=analyzer.MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         ),
@@ -124,7 +124,7 @@ def extract_units(
 ) -> list[TractUnit]:
     """Use Claude to pull named tracts + their legal descriptions from a document."""
     log = on_progress or (lambda s: None)
-    log(f"reading tracts from description document via {analyzer.SONNET} …")
+    log(f"reading tracts from description document via {analyzer.OPUS} …")
     prompt = _load_prompt("extract.md").replace("{document}", document_text)
     text = _text(_message(client, prompt, log))
     try:
@@ -174,7 +174,7 @@ def propose_assignment(
 
     batches = [rows[i : i + ASSIGN_BATCH_SIZE] for i in range(0, len(rows), ASSIGN_BATCH_SIZE)]
     log(f"matching {len(rows)} rows to {len(units)} tract(s) in {len(batches)} batch(es) "
-        f"via {analyzer.SONNET} …")
+        f"via {analyzer.OPUS} …")
 
     mapping: dict[int, list[str]] = {}
     for bi, batch in enumerate(batches, 1):

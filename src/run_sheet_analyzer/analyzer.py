@@ -22,8 +22,7 @@ from typing import Callable
 import anthropic
 
 
-SONNET = "claude-sonnet-5"            # tract reading in assignment.py
-OPUS = "claude-opus-4-8"              # mineral chain + full report assembly
+OPUS = "claude-opus-4-8"              # all evaluations: tract reading, mineral chain, report assembly
 
 MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
 MAX_CONTINUATIONS = 4        # if the model still hits max_tokens, keep asking it to continue
@@ -35,10 +34,8 @@ _CACHE_LONG = {"type": "ephemeral", "ttl": "1h"}
 _CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
 # Pricing per 1M tokens (USD) — verify at console.anthropic.com.
-# Sonnet 5 list price is $3/$15 (introductory $2/$10 per MTok through 2026-08-31).
 _RATES: dict[str, dict[str, float]] = {
-    SONNET: {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    OPUS:   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    OPUS: {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
 }
 
 
@@ -69,7 +66,7 @@ class TokenUsage:
         self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
 
     def cost_usd(self, model: str) -> float:
-        rates = _RATES.get(model, _RATES[SONNET])
+        rates = _RATES.get(model, _RATES[OPUS])
         return (
             self.input_tokens         * rates["input"]
             + self.output_tokens      * rates["output"]
@@ -219,7 +216,7 @@ def _build_tract_prompt(
     tract_id: str, rows: list, le_rows: list, job: JobConfig,
     commentary: str = "", mineral_analysis: str = "",
 ) -> str:
-    """Prompt for the Sonnet full-report assembly. The mineral analysis from the
+    """Prompt for the Opus full-report assembly. The mineral analysis from the
     Opus phase is supplied verbatim for the assembler to fold in (or, when
     minerals are excluded, a surface-only instruction replaces it)."""
     events_text, le_text = _events_blocks(rows, le_rows)
@@ -385,7 +382,7 @@ def analyze_tract(
 
       1. Mineral chain — Opus 4.8 (more complex; adaptive thinking). Produces a
          concise mineral-vesting / mineral-exception block.
-      2. Full report — Sonnet 5 (adaptive thinking). Assembles CHAIN OF TITLE,
+      2. Full report — Opus 4.8 (adaptive thinking). Assembles CHAIN OF TITLE,
          surface vesting, description, and exceptions, folding in the Opus
          mineral block verbatim.
 

@@ -102,6 +102,42 @@ def _text(resp) -> str:
     return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
 
 
+def _message_to_completion(
+    client: anthropic.Anthropic, prompt: str, log: Callable[[str], None]
+) -> tuple[str, bool]:
+    """Run one message to completion, auto-continuing if it hits the output cap.
+
+    Mirrors ``analyzer._generate``'s continuation loop for the plain (no system,
+    no thinking) message shape used here. Concatenating the raw text chunks is
+    seamless — each continuation resumes exactly where the previous one stopped,
+    so a JSON reply split across the cap reassembles into valid JSON. Returns
+    ``(accumulated_text, truncated)``; ``truncated`` is True only if the model
+    was still cut off after ``MAX_CONTINUATIONS`` attempts.
+    """
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    accumulated = ""
+    for attempt in range(1 + analyzer.MAX_CONTINUATIONS):
+        if attempt > 0:
+            log(f"extraction truncated; continuation #{attempt} …")
+            messages = messages + [
+                {"role": "assistant", "content": accumulated},
+                {"role": "user", "content": analyzer._CONTINUE_PROMPT},
+            ]
+        resp = analyzer._create_with_retry(
+            client,
+            kwargs=dict(
+                model=analyzer.OPUS,
+                max_tokens=analyzer.MAX_TOKENS,
+                messages=messages,
+            ),
+            on_progress=log,
+        )
+        accumulated += _text(resp)
+        if resp.stop_reason != "max_tokens":
+            return accumulated, False
+    return accumulated, True
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Reading tracts from a legal-description document
 # ──────────────────────────────────────────────────────────────────────────
@@ -126,7 +162,13 @@ def extract_units(
     log = on_progress or (lambda s: None)
     log(f"reading tracts from description document via {analyzer.OPUS} …")
     prompt = _load_prompt("extract.md").replace("{document}", document_text)
-    text = _text(_message(client, prompt, log))
+    text, truncated = _message_to_completion(client, prompt, log)
+    if truncated:
+        raise ValueError(
+            "tract-extraction response was still truncated at the model output cap "
+            f"after {analyzer.MAX_CONTINUATIONS} continuations — the legal-description "
+            "document may be too large; split it into smaller files and retry."
+        )
     try:
         data = _extract_json(text)
     except json.JSONDecodeError as e:

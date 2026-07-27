@@ -161,8 +161,7 @@ If any area returns `confidence: low`, the pipeline re-asks that area with model
 
 ### 6.2 Model & caching
 
-- Default model: `claude-sonnet-5` with adaptive thinking enabled (`thinking: { type: "adaptive" }`, `output_config.effort: "high"`).
-- Escalation model: `claude-opus-4-8` (1M context).
+- Model: the newest `claude-opus-*` the Models API reports at startup, with `claude-opus-5` as the floor and the fallback if the lookup fails. Pin an exact id with the `RUN_SHEET_MODEL` environment variable. All phases run on the same model, with adaptive thinking enabled (`thinking: { type: "adaptive" }`, `output_config.effort: "high"`).
 - Prompt caching: system prompt + the full run-sheet markdown table get `cache_control: ephemeral`. The full run sheet is cached **once per process run** and reused across all tracts in the same invocation. Per-tract user messages are not cached.
 
 ### 6.3 Output schemas (JSON, condensed)
@@ -504,7 +503,7 @@ Any field that the job config or analysis didn't fill is rendered as an empty st
       "mineral": { /* mineral_chain.schema */ },
       "exceptions": { /* exceptions.schema */ },
       "input_hash": "sha256:...",
-      "model_used": { "surface": "sonnet-5", "mineral": "sonnet-5", "exceptions": "opus-4-8" },
+      "model_used": { "surface": "claude-opus-5", "mineral": "claude-opus-5", "exceptions": "claude-opus-5" },
       "generated_at": "2026-05-11T12:34:56Z"
     }
   }

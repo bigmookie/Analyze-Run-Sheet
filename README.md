@@ -161,6 +161,7 @@ Run Sheet Analyzer/
 - **Firm template**: edit `Abstract - Report - Minerals.docx` in Word. The builder detects the SHA-256 change and regenerates `templates/title-report.docx` on the next run.
 - **Adding a reference doc**: build a new DB with Embeddings DB Creator (`python create_embeddings_db.py`) targeting `refs/`. The analyzer picks it up automatically — no code change.
 - **Force-rebuild cached analyses**: `setx ANALYZER_REBUILD 1` (or set it once in the shell). Unset to resume cached behavior.
+- **Model**: by default the analyzer queries the API at startup and uses the newest Opus model available (never older than `claude-opus-5`), so a new Opus release is picked up without a code change. The model in use is printed at the top of each run. To pin one instead, set `RUN_SHEET_MODEL=claude-opus-5` in `.env` — do that when a run has to be reproducible, or if a new release changes the output style.
 - **Disable Opus escalation** (useful while iterating on prompts): `setx ANALYZER_NO_ESCALATE 1`.
 
 ---
@@ -169,7 +170,7 @@ Run Sheet Analyzer/
 
 A 15-tract run sheet of typical complexity:
 
-- Claude (Sonnet 5 with adaptive thinking, occasional Opus 4.8 escalation): **$1–3**.
+- Claude (latest Opus, adaptive thinking at high effort): **$1–3**.
 - Voyage retrieval + reranking: **a few cents**.
 
 Per-tract input is ~50K tokens on the first turn (system prompt + run sheet + tract context + retrieved standards). Subsequent area turns within the same tract reuse the cached prefix at ~10% of normal input cost.

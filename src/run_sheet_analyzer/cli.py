@@ -38,6 +38,7 @@ from run_sheet_analyzer.analyzer import (
     JobConfig,
     OPUS,
     TokenUsage,
+    active_model,
     analyze_tract,
     stop_event,
 )
@@ -450,8 +451,8 @@ def main() -> int:
     print(flush=True)
     print("=" * 60, flush=True)
     print("  Run Sheet Analyzer", flush=True)
-    print(f"  Mineral chain : {OPUS}", flush=True)
-    print(f"  Report assembly: {OPUS}", flush=True)
+    print("  Mineral chain + report assembly: latest Opus "
+          f"(≥ {OPUS}; pin with RUN_SHEET_MODEL)", flush=True)
     print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)
@@ -517,6 +518,9 @@ def main() -> int:
         print("Minerals EXCLUDED — surface-only report (mineral chain phase skipped).", flush=True)
 
     client = anthropic.Anthropic(max_retries=0, timeout=600.0)
+    # Resolve the model once, up front, so every phase and the cost summary
+    # agree — and so the examiner sees which model produced the report.
+    active_model(client, lambda s: print(s, flush=True))
 
     # Tract selection
     tract_ids = parsed.tract_ids()

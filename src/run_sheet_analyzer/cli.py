@@ -29,19 +29,23 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
-import anthropic
-
 from run_sheet_analyzer import assignment
 from run_sheet_analyzer import cache as cache_mod
 from run_sheet_analyzer.analyzer import (
+    API_ERRORS,
+    GPT,
     AnalysisInterrupted,
     JobConfig,
     OPUS,
+    ProviderConfigError,
     TokenUsage,
-    active_model,
     analyze_tract,
+    build_provider,
+    check_env,
+    env_summary,
     stop_event,
 )
+from run_sheet_analyzer.providers import PROVIDER_ENV_VAR
 from run_sheet_analyzer.parser import MissingColumnsError, parse
 from run_sheet_analyzer.renderer import render_report
 from run_sheet_analyzer.template_builder import ensure_template
@@ -52,12 +56,7 @@ TEMPLATE_DEST = ROOT / "templates" / "title-report.docx"
 
 
 def _check_env() -> str | None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return (
-            "Missing ANTHROPIC_API_KEY.\n"
-            "Copy .env.example to .env in the project root and set the key."
-        )
-    return None
+    return check_env()
 
 
 def _clean_path(raw: str) -> str:
@@ -198,14 +197,14 @@ def _prompt_units(prefill: list[str]) -> list[str]:
     return units
 
 
-def _load_units_from_file(path: Path, client, confirm: bool) -> list:
-    """Read a .txt/.docx legal-description file and extract its tracts via Claude.
+def _load_units_from_file(path: Path, provider, confirm: bool) -> list:
+    """Read a .txt/.docx legal-description file and extract its tracts.
 
     Returns a list of assignment.TractUnit (possibly empty if declined).
     """
     text = assignment.read_document(path)
     units = assignment.extract_units(
-        client=client, document_text=text,
+        provider=provider, document_text=text,
         on_progress=lambda m: print(f"  {m}", flush=True),
     )
     if not units:
@@ -220,7 +219,7 @@ def _load_units_from_file(path: Path, client, confirm: bool) -> list:
     return units
 
 
-def _define_tracts(job: JobConfig, args, client) -> tuple[list, str]:
+def _define_tracts(job: JobConfig, args, provider) -> tuple[list, str]:
     """Build the tract units for the blank-Tract-column flow.
 
     Returns (units, granularity_label). Units are assignment.TractUnit objects;
@@ -232,7 +231,7 @@ def _define_tracts(job: JobConfig, args, client) -> tuple[list, str]:
     if not interactive:
         # Non-interactive: everything must come from job.yaml.
         if job.description_file:
-            return _load_units_from_file(Path(job.description_file), client, confirm=False), doc_label
+            return _load_units_from_file(Path(job.description_file), provider, confirm=False), doc_label
         if job.tracts:
             units = [assignment.TractUnit(assignment._safe_id(u), u) for u in job.tracts]
             return units, job.tract_granularity or "as provided"
@@ -263,7 +262,7 @@ def _define_tracts(job: JobConfig, args, client) -> tuple[list, str]:
         if not path.is_file():
             print(f"  ERROR: file not found: {path}", flush=True)
             return [], ""
-        return _load_units_from_file(path, client, confirm=True), doc_label
+        return _load_units_from_file(path, provider, confirm=True), doc_label
 
     granularity = _prompt_granularity()
     typed = _prompt_units(prefill=job.tracts)
@@ -441,10 +440,21 @@ def main() -> int:
     parser_.add_argument(
         "--no-minerals",
         action="store_true",
-        help="Exclude minerals: skip the mineral-chain (Opus) phase and produce a "
+        help="Exclude minerals: skip the mineral-chain phase and produce a "
              "surface-only report. Overrides job.yaml and the interactive prompt.",
     )
+    parser_.add_argument(
+        "--provider",
+        choices=["auto", "anthropic", "openai"],
+        help="Which model provider to use. 'auto' (default) runs on Claude and "
+             "fails over to OpenAI when Claude is unavailable; 'anthropic' and "
+             "'openai' pin one provider. Overrides RUN_SHEET_PROVIDER.",
+    )
     args = parser_.parse_args()
+
+    # --provider is just an override for the env var the providers module reads.
+    if args.provider:
+        os.environ[PROVIDER_ENV_VAR] = args.provider
 
     _install_interrupt_handler()
 
@@ -453,6 +463,9 @@ def main() -> int:
     print("  Run Sheet Analyzer", flush=True)
     print("  Mineral chain + report assembly: latest Opus "
           f"(≥ {OPUS}; pin with RUN_SHEET_MODEL)", flush=True)
+    print(f"  Fallback when Claude is unavailable: {GPT} "
+          "(pin with RUN_SHEET_OPENAI_MODEL)", flush=True)
+    print(f"  Keys found: {env_summary()}", flush=True)
     print("  Kill: press Ctrl+C (twice to force-quit).", flush=True)
     print("=" * 60, flush=True)
     print(flush=True)
@@ -517,10 +530,14 @@ def main() -> int:
     if not job.include_minerals:
         print("Minerals EXCLUDED — surface-only report (mineral chain phase skipped).", flush=True)
 
-    client = anthropic.Anthropic(max_retries=0, timeout=600.0)
-    # Resolve the model once, up front, so every phase and the cost summary
-    # agree — and so the examiner sees which model produced the report.
-    active_model(client, lambda s: print(s, flush=True))
+    # Resolve the provider and its model once, up front, so every phase and the
+    # cost summary agree — and so the examiner sees what produced the report.
+    try:
+        provider = build_provider(lambda s: print(s, flush=True))
+    except ProviderConfigError as e:
+        print(f"ERROR: {e}", flush=True)
+        return 1
+    print(f"model: {provider.describe()}", flush=True)
 
     # Tract selection
     tract_ids = parsed.tract_ids()
@@ -533,8 +550,8 @@ def main() -> int:
               "in this mode; manage those by hand if needed.", flush=True)
 
         try:
-            units, granularity = _define_tracts(job, args, client)
-        except (OSError, ValueError, anthropic.APIError) as e:
+            units, granularity = _define_tracts(job, args, provider)
+        except API_ERRORS as e:
             print(f"ERROR: could not read tracts: {e}", flush=True)
             return 1
         if not units:
@@ -547,10 +564,10 @@ def main() -> int:
 
         try:
             mapping = assignment.propose_assignment(
-                client=client, rows=parsed.rows, units=units,
+                provider=provider, rows=parsed.rows, units=units,
                 granularity=granularity, on_progress=lambda m: print(f"  {m}", flush=True),
             )
-        except (ValueError, anthropic.APIError) as e:
+        except API_ERRORS as e:
             print(f"ERROR: tract assignment failed: {e}", flush=True)
             return 1
 
@@ -626,12 +643,7 @@ def main() -> int:
     def _merge_usage(src: dict[str, TokenUsage]) -> None:
         with state_lock:
             for model, u in src.items():
-                if model not in total_usage:
-                    total_usage[model] = TokenUsage()
-                total_usage[model].input_tokens       += u.input_tokens
-                total_usage[model].output_tokens      += u.output_tokens
-                total_usage[model].cache_write_tokens += u.cache_write_tokens
-                total_usage[model].cache_read_tokens  += u.cache_read_tokens
+                total_usage.setdefault(model, TokenUsage()).add(u)
 
     def process_tract(tid: str) -> None:
         if stop_event.is_set():
@@ -648,7 +660,7 @@ def main() -> int:
         log(f"[{tid}] starting ({len(tract.rows)} events) …")
         try:
             text, usage_by_model = analyze_tract(
-                client=client,
+                provider=provider,
                 tract=tract,
                 p=parsed,
                 job=job,
@@ -662,7 +674,11 @@ def main() -> int:
                 cum_cost = sum(u.cost_usd(m) for m, u in total_usage.items())
                 done = len(sections)
                 total = len(selected)
-            log(f"[{tid}] done  ({len(text):,} chars)  |  {done}/{total} done, ~${cum_cost:.4f}")
+            # Name the model(s) that produced this section — with failover on, a
+            # report can mix providers, and the examiner should see which is which.
+            via = ", ".join(sorted(usage_by_model)) or "cache"
+            log(f"[{tid}] done  ({len(text):,} chars, via {via})  |  "
+                f"{done}/{total} done, ~${cum_cost:.4f}")
         except AnalysisInterrupted:
             log(f"[{tid}] interrupted before completion")
         except Exception as e:

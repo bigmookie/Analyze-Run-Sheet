@@ -2,6 +2,10 @@
 # Install: pip install -r requirements.txt
 
 anthropic>=0.39
+# Fallback provider. 1.66 is the floor for the Responses API; newer builds add
+# typed xhigh/max reasoning effort and a native prompt_cache_key parameter,
+# both of which this project routes through extra_body so old builds still work.
+openai>=1.66
 openpyxl>=3.1
 python-docx>=1.1
 docxtpl>=0.16

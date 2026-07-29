@@ -3,12 +3,12 @@
 The examiner defines the tracts — either by typing units (section /
 quarter / quarter-quarter / full legal description) or by providing a legal
 description document (.txt / .docx) that names tracts and gives each a full legal
-description. Claude then reads each run-sheet row's brief description and decides
-which tract(s) the instrument affects. We re-bucket the rows into
+description. The model then reads each run-sheet row's brief description and
+decides which tract(s) the instrument affects. We re-bucket the rows into
 ``parsed.tracts`` exactly as the parser would, so the rest of the pipeline is
 untouched.
 
-One Claude call to extract tracts from a document, one to match rows. No PLSS
+One model call to extract tracts from a document, one to match rows. No PLSS
 parsing in Python — the model does the aliquot reasoning.
 """
 from __future__ import annotations
@@ -20,10 +20,9 @@ from importlib import resources
 from pathlib import Path
 from typing import Callable
 
-import anthropic
 import openpyxl
 
-from run_sheet_analyzer import analyzer
+from run_sheet_analyzer.providers import MAX_CONTINUATIONS, Provider
 from run_sheet_analyzer.parser import (
     ParsedRunSheet,
     RunSheetRow,
@@ -86,56 +85,15 @@ def _extract_json(text: str) -> dict:
 ASSIGN_BATCH_SIZE = 40
 
 
-def _message(client: anthropic.Anthropic, prompt: str, log: Callable[[str], None]):
-    return analyzer._create_with_retry(
-        client,
-        kwargs=dict(
-            model=analyzer.active_model(client),
-            max_tokens=analyzer.MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        ),
-        on_progress=log,
-    )
+def _ask(provider: Provider, prompt: str, log: Callable[[str], None]) -> tuple[str, bool]:
+    """One plain call (no system prompt, low reasoning effort) run to completion.
 
-
-def _text(resp) -> str:
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-
-
-def _message_to_completion(
-    client: anthropic.Anthropic, prompt: str, log: Callable[[str], None]
-) -> tuple[str, bool]:
-    """Run one message to completion, auto-continuing if it hits the output cap.
-
-    Mirrors ``analyzer._generate``'s continuation loop for the plain (no system,
-    no thinking) message shape used here. Concatenating the raw text chunks is
-    seamless — each continuation resumes exactly where the previous one stopped,
-    so a JSON reply split across the cap reassembles into valid JSON. Returns
-    ``(accumulated_text, truncated)``; ``truncated`` is True only if the model
-    was still cut off after ``MAX_CONTINUATIONS`` attempts.
+    Concatenating the continuation chunks is seamless — each resumes exactly
+    where the previous one stopped, so a JSON reply split across the output cap
+    reassembles into valid JSON. Returns ``(text, truncated)``; ``truncated`` is
+    True only if the model was still cut off after ``MAX_CONTINUATIONS`` attempts.
     """
-    messages: list[dict] = [{"role": "user", "content": prompt}]
-    accumulated = ""
-    for attempt in range(1 + analyzer.MAX_CONTINUATIONS):
-        if attempt > 0:
-            log(f"extraction truncated; continuation #{attempt} …")
-            messages = messages + [
-                {"role": "assistant", "content": accumulated},
-                {"role": "user", "content": analyzer._CONTINUE_PROMPT},
-            ]
-        resp = analyzer._create_with_retry(
-            client,
-            kwargs=dict(
-                model=analyzer.active_model(client),
-                max_tokens=analyzer.MAX_TOKENS,
-                messages=messages,
-            ),
-            on_progress=log,
-        )
-        accumulated += _text(resp)
-        if resp.stop_reason != "max_tokens":
-            return accumulated, False
-    return accumulated, True
+    return provider.complete(user_prompt=prompt, log=log)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -154,19 +112,19 @@ def read_document(path: str | Path) -> str:
 
 def extract_units(
     *,
-    client: anthropic.Anthropic,
+    provider: Provider,
     document_text: str,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[TractUnit]:
-    """Use Claude to pull named tracts + their legal descriptions from a document."""
+    """Pull named tracts + their legal descriptions from a document."""
     log = on_progress or (lambda s: None)
-    log(f"reading tracts from description document via {analyzer.active_model(client)} …")
+    log("reading tracts from description document …")
     prompt = _load_prompt("extract.md").replace("{document}", document_text)
-    text, truncated = _message_to_completion(client, prompt, log)
+    text, truncated = _ask(provider, prompt, log)
     if truncated:
         raise ValueError(
             "tract-extraction response was still truncated at the model output cap "
-            f"after {analyzer.MAX_CONTINUATIONS} continuations — the legal-description "
+            f"after {MAX_CONTINUATIONS} continuations — the legal-description "
             "document may be too large; split it into smaller files and retry."
         )
     try:
@@ -197,13 +155,13 @@ def extract_units(
 
 def propose_assignment(
     *,
-    client: anthropic.Anthropic,
+    provider: Provider,
     rows: list[RunSheetRow],
     units: list[TractUnit],
     granularity: str,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[int, list[str]]:
-    """Ask Claude which tract(s) each row affects.
+    """Ask the model which tract(s) each row affects.
 
     Returns a mapping of row_index → list of matched tract ids. Rows that matched
     no unit are absent / map to an empty list; the caller gets the definitive
@@ -215,8 +173,7 @@ def propose_assignment(
     valid_units = {u.id for u in units}
 
     batches = [rows[i : i + ASSIGN_BATCH_SIZE] for i in range(0, len(rows), ASSIGN_BATCH_SIZE)]
-    log(f"matching {len(rows)} rows to {len(units)} tract(s) in {len(batches)} batch(es) "
-        f"via {analyzer.active_model(client)} …")
+    log(f"matching {len(rows)} rows to {len(units)} tract(s) in {len(batches)} batch(es) …")
 
     mapping: dict[int, list[str]] = {}
     for bi, batch in enumerate(batches, 1):
@@ -225,14 +182,14 @@ def propose_assignment(
         rows_text = "\n".join(_format_row(r) for r in batch)
         prompt = template.format(granularity=granularity, units=units_text, rows=rows_text)
 
-        resp = _message(client, prompt, log)
-        if resp.stop_reason == "max_tokens":
+        text, truncated = _ask(provider, prompt, log)
+        if truncated:
             raise ValueError(
                 "assignment response hit the output cap before completing — "
                 "reduce ASSIGN_BATCH_SIZE and retry."
             )
         try:
-            data = _extract_json(_text(resp))
+            data = _extract_json(text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Could not parse the assignment response as JSON: {e}") from e
 

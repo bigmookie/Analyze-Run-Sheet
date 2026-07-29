@@ -10,6 +10,11 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
 
 - Python 3.10 or newer.
 - An **Anthropic** API key (for Claude analysis).
+- Optionally, an **OpenAI** API key. Claude is the primary model; when it's
+  unavailable — a 529 `overloaded_error`, a 5xx, a rate limit, a dropped
+  connection — each affected call automatically re-runs on OpenAI instead of
+  failing the run. Without an OpenAI key the analyzer works exactly as before,
+  but a Claude outage aborts the run.
 
 ---
 
@@ -32,11 +37,15 @@ For the full design rationale, see [SPEC.md](./SPEC.md). This README covers setu
    pip install -e .
    ```
 
-3. **Set the API key.** Copy `.env.example` to `.env` and fill in:
+3. **Set the API keys.** Copy `.env.example` to `.env` and fill in:
 
    ```
    ANTHROPIC_API_KEY=sk-ant-...
+   OPENAI_API_KEY=sk-proj-...     # optional; enables automatic failover
    ```
+
+   `.env.example` documents the optional provider, model-pinning, and failover
+   settings alongside each key.
 
 4. **Confirm the firm template is in the project root.** The renderer reads `Abstract - Report - Minerals.docx` from the root and regenerates `templates/title-report.docx` automatically whenever the source changes.
 
@@ -136,19 +145,20 @@ Run Sheet Analyzer/
 ├── docs/                                # optional source PDFs / OCR txt (gitignored)
 ├── out/                                 # per-tract JSON cache + smoke artifacts
 ├── src/run_sheet_analyzer/
-│   ├── cli.py             # Tkinter orchestration
+│   ├── cli.py             # prompts, parallel tract execution, cost summary
 │   ├── parser.py          # strict-schema Excel parser
-│   ├── models.py          # pydantic JSON schemas
-│   ├── analyzer.py        # agentic Claude conversation
-│   ├── reconciler.py      # Fraction math validator
+│   ├── analyzer.py        # prompt assembly + per-tract two-phase analysis
+│   ├── providers.py       # Claude / OpenAI clients, retries, failover
+│   ├── assignment.py      # row → tract matching when the Tract column is blank
 │   ├── template_builder.py # programmatic template prep
 │   ├── renderer.py        # docx rendering
 │   ├── cache.py           # per-tract hash cache
 │   └── prompts/
 │       ├── system.md        # attorney role + MS methodology
-│       ├── surface.md       # surface chain turn
-│       ├── mineral.md       # mineral chain turn
-│       └── exceptions.md    # exception classification turn
+│       ├── mineral.md       # mineral chain phase
+│       ├── tract.md         # full-report assembly phase
+│       ├── extract.md       # tracts from a legal-description document
+│       └── assign.md        # row → tract matching
 ├── scripts/research.py     # ad-hoc retrieval over refs/ for spec research
 └── tests/fixtures/
 ```
@@ -163,6 +173,22 @@ Run Sheet Analyzer/
 - **Force-rebuild cached analyses**: `setx ANALYZER_REBUILD 1` (or set it once in the shell). Unset to resume cached behavior.
 - **Model**: by default the analyzer queries the API at startup and uses the newest Opus model available (never older than `claude-opus-5`), so a new Opus release is picked up without a code change. The model in use is printed at the top of each run. To pin one instead, set `RUN_SHEET_MODEL=claude-opus-5` in `.env` — do that when a run has to be reproducible, or if a new release changes the output style.
 - **Disable Opus escalation** (useful while iterating on prompts): `setx ANALYZER_NO_ESCALATE 1`.
+- **Provider**: `--provider auto|anthropic|openai` for one run, or `RUN_SHEET_PROVIDER` in `.env` to make it stick. `auto` (the default) runs on Claude and fails over to OpenAI; the other two pin a single provider. See below.
+
+---
+
+## Providers and failover
+
+Claude does the work. OpenAI is the safety net.
+
+When a call to Claude fails in a way that means *Claude can't serve it right now* — 529 `overloaded_error`, 5xx, a rate limit, a dropped connection, a bad key, a model the account can't reach — the analyzer retries Claude with exponential backoff, and if it's still failing, re-runs that whole call on OpenAI's frontier model (`gpt-5.6-sol` by default) and carries on. A malformed request (HTTP 400/422) is *not* failed over: the other provider would reject it too, so it surfaces as an error.
+
+Failover is per call, so a single overloaded window no longer kills a 15-tract run. Two consequences worth knowing:
+
+- **A report can mix providers.** Each tract's `done` line names the model that produced it (`via claude-opus-5` / `via gpt-5.6-sol`), and the closing token-usage table breaks cost out per model, so it's always visible which sections came from where. Pin `--provider` if a given report has to be single-model.
+- **After a failover, Claude is skipped for 5 minutes** (`RUN_SHEET_FAILOVER_COOLDOWN`) instead of every remaining tract re-paying the full retry ladder against an outage that's already known to be in progress. Set it to `0` to retry Claude on every call.
+
+Cost is close enough between the two that failover won't surprise you: Opus 5 is \$5/\$25 per Mtok in/out, `gpt-5.6-sol` is \$5/\$30. OpenAI runs at `high` reasoning effort to match the Claude path's adaptive thinking; tune with `RUN_SHEET_OPENAI_EFFORT` (`low`…`max`). Server-side response retention is **off** by default, since run sheets are confidential client work.
 
 ---
 
@@ -172,6 +198,8 @@ A 15-tract run sheet of typical complexity:
 
 - Claude (latest Opus, adaptive thinking at high effort): **$1–3**.
 - Voyage retrieval + reranking: **a few cents**.
+
+If some or all tracts fail over to `gpt-5.6-sol`, expect roughly the same total — its output rate is 20% higher than Opus 5's, and its hidden reasoning tokens bill as output.
 
 Per-tract input is ~50K tokens on the first turn (system prompt + run sheet + tract context + retrieved standards). Subsequent area turns within the same tract reuse the cached prefix at ~10% of normal input cost.
 
@@ -184,6 +212,10 @@ Per-tract input is ~50K tokens on the first turn (system prompt + run sheet + tr
 **"Missing required column(s): X"** — the run sheet header is missing one of the 12 required columns. Use the table above (or a documented synonym) and re-run.
 
 **"Missing API keys"** — copy `.env.example` to `.env` and fill in both `VOYAGE_API_KEY` and `ANTHROPIC_API_KEY`.
+
+**`OverloadedError: Error code: 529`** — Anthropic is at capacity. The analyzer retries with backoff and, if `OPENAI_API_KEY` is set, finishes the run on `gpt-5.6-sol`. If you see the run abort on 529 instead, either no OpenAI key is set or `RUN_SHEET_PROVIDER=anthropic` is pinning Claude.
+
+**`gpt-5.6-sol is not available to this OpenAI key`** — the account can't reach the frontier tier (it sometimes requires organization verification). The analyzer falls back to the newest `gpt-5*` model the key *can* reach and names it in the log. Verify the org at platform.openai.com, or pin a model you do have with `RUN_SHEET_OPENAI_MODEL`.
 
 **Mineral fractions don't reconcile to 1** — the analyzer asks Claude to correct itself once and escalates to Opus. If it still can't reconcile, the report renders with an ATTORNEY REVIEW callout naming the imbalance. Inspect the chain in the appendix to find the missing or duplicated fractional event.
 

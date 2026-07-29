@@ -2,144 +2,56 @@
 
 For each tract:
   1. Filter run-sheet rows that belong to the tract, sort by date_recorded.
-  2. Send ONE Claude call with a focused prompt.
+  2. Send ONE model call per phase with a focused prompt.
   3. Return the model's plain-text response (the report section for that tract).
 
 No JSON schemas, no multi-turn agentic conversations, no tool use. Just:
 filter, sort, ask, get text back.
+
+*Which* model answers is providers.py's business — Claude by default, OpenAI
+when Claude is unavailable. Everything here is provider-agnostic.
 """
 from __future__ import annotations
 
-import os
-import threading
-import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from importlib import resources
-from pathlib import Path
 from typing import Callable
 
-import anthropic
+from run_sheet_analyzer.providers import (
+    API_ERRORS,
+    GPT,
+    MAX_CONTINUATIONS,
+    MAX_TOKENS,
+    OPUS,
+    AnalysisInterrupted,
+    Provider,
+    ProviderConfigError,
+    TokenUsage,
+    build_provider,
+    check_env,
+    env_summary,
+    stop_event,
+)
 
-
-# Every evaluation (tract reading, mineral chain, report assembly) runs on Opus.
-# OPUS is the floor: the oldest model this project will run on, and the fallback
-# when the API lookup below can't be made.
-OPUS = "claude-opus-5"
-
-# By default the analyzer asks the API which models exist and uses the newest
-# Opus, so a new Opus release is picked up with no code change. Set
-# RUN_SHEET_MODEL in .env to pin an exact id (e.g. RUN_SHEET_MODEL=claude-opus-5)
-# when a run has to be reproducible.
-MODEL_ENV_VAR = "RUN_SHEET_MODEL"
-_AUTO_VALUES = {"", "auto", "latest"}
-_resolved_model: str | None = None
-_model_lock = threading.Lock()   # tracts are analyzed in parallel
-
-MAX_TOKENS = 16_000          # large tracts can exceed 8K; truncation triggers continuation
-MAX_CONTINUATIONS = 4        # if the model still hits max_tokens, keep asking it to continue
-MAX_API_RETRIES = 5
-RETRY_BACKOFF_BASE = 3.0
-
-# 1-hour cache TTL for the (small) system prompt that's reused across tracts.
-_CACHE_LONG = {"type": "ephemeral", "ttl": "1h"}
-_CACHE_BETA_HEADER = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
-
-# Pricing per 1M tokens (USD) — verify at console.anthropic.com. A model that
-# isn't listed (a newer Opus picked up automatically) is costed at these rates,
-# so the run summary is an estimate whenever the id differs from OPUS.
-_RATES: dict[str, dict[str, float]] = {
-    OPUS: {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-}
-
-
-def active_model(
-    client: anthropic.Anthropic | None = None,
-    log: Callable[[str], None] | None = None,
-) -> str:
-    """The model id this run uses, decided once per process.
-
-      1. RUN_SHEET_MODEL, when set to anything other than "auto"/"latest".
-      2. The newest ``claude-opus-*`` the Models API reports — never older than
-         OPUS, and never outside the Opus family (so it won't drift onto a
-         differently-priced tier on its own).
-      3. OPUS, when the lookup fails or no client is available yet.
-    """
-    global _resolved_model
-    with _model_lock:
-        if _resolved_model:
-            return _resolved_model
-
-        pin = os.environ.get(MODEL_ENV_VAR, "").strip()
-        if pin.lower() not in _AUTO_VALUES:
-            _resolved_model = pin
-            if log:
-                log(f"model pinned by {MODEL_ENV_VAR}: {pin}")
-            return _resolved_model
-
-        if client is None:
-            return OPUS      # unresolved — don't cache; a client may arrive later
-
-        try:
-            available = list(client.models.list())
-        except Exception as e:   # offline, bad key, response shape change — stay on the floor
-            if log:
-                log(f"model lookup failed ({type(e).__name__}); using {OPUS}")
-            _resolved_model = OPUS
-            return _resolved_model
-
-        opus = [m for m in available if m.id.startswith("claude-opus-")]
-        newest = max(opus, key=lambda m: m.created_at, default=None)
-        floor = next((m for m in opus if m.id == OPUS), None)
-        if newest is None or (floor is not None and newest.created_at < floor.created_at):
-            _resolved_model = OPUS
-        else:
-            _resolved_model = newest.id
-        if log:
-            log(f"model: {_resolved_model}"
-                + ("" if _resolved_model == OPUS else f" (newest Opus; floor {OPUS})"))
-        return _resolved_model
-
-
-class AnalysisInterrupted(Exception):
-    pass
-
-
-stop_event = threading.Event()
-
-
-def _check_stop() -> None:
-    if stop_event.is_set():
-        raise AnalysisInterrupted("Interrupted by user")
-
-
-@dataclass
-class TokenUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_write_tokens: int = 0
-    cache_read_tokens: int = 0
-
-    def add(self, response) -> None:
-        u = response.usage
-        self.input_tokens += u.input_tokens
-        self.output_tokens += u.output_tokens
-        self.cache_write_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
-        self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
-
-    def cost_usd(self, model: str) -> float:
-        rates = _RATES.get(model, _RATES[OPUS])
-        return (
-            self.input_tokens         * rates["input"]
-            + self.output_tokens      * rates["output"]
-            + self.cache_write_tokens * rates["cache_write"]
-            + self.cache_read_tokens  * rates["cache_read"]
-        ) / 1_000_000
-
-
-def _acc(usage_by_model: dict, model: str, response) -> None:
-    """Accumulate one response's token usage into the per-model dict."""
-    usage_by_model.setdefault(model, TokenUsage()).add(response)
+# Re-exported so callers keep importing these from analyzer.
+__all__ = [
+    "API_ERRORS",
+    "GPT",
+    "JobConfig",
+    "MAX_CONTINUATIONS",
+    "MAX_TOKENS",
+    "OPUS",
+    "AnalysisInterrupted",
+    "Provider",
+    "ProviderConfigError",
+    "TokenUsage",
+    "analyze_tract",
+    "build_provider",
+    "check_env",
+    "env_summary",
+    "stop_event",
+]
 
 
 @dataclass
@@ -156,7 +68,7 @@ class JobConfig:
     tracts: list[str] = field(default_factory=list)
     tract_granularity: str = ""
     description_file: str = ""
-    # When False, the mineral-chain (Opus) phase is skipped and the report covers
+    # When False, the mineral-chain phase is skipped and the report covers
     # surface title only — no mineral vesting line, no mineral leases section.
     include_minerals: bool = True
 
@@ -175,7 +87,9 @@ def _load_prompt(name: str) -> str:
 
 def _format_event(row, idx: int) -> str:
     """One bullet per row in the events table."""
-    cite = row.cite   # Book/Page when present, else Instrument No.
+    cite = f"Book {row.book} at Page {row.page}"
+    if row.instrument_no:
+        cite = f"Instrument No. {row.instrument_no} ({cite})"
     recorded = row.date_recorded.isoformat() if row.date_recorded else "n/a"
     grantors = " | ".join(row.grantors) or "—"
     grantees = " | ".join(row.grantees) or "—"
@@ -223,7 +137,7 @@ def _events_blocks(rows: list, le_rows: list):
 def _build_mineral_prompt(
     tract_id: str, rows: list, le_rows: list, job: JobConfig, commentary: str = ""
 ) -> str:
-    """Prompt for the Opus mineral-chain analysis (minerals only)."""
+    """Prompt for the mineral-chain analysis (minerals only)."""
     events_text, le_text = _events_blocks(rows, le_rows)
     template = _load_prompt("mineral.md")
     return template.format(
@@ -238,7 +152,7 @@ def _build_mineral_prompt(
 def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
     """The mineral portion injected into the assembler prompt.
 
-    Included → hand the Opus mineral block to the assembler to fold in verbatim.
+    Included → hand the phase-1 mineral block to the assembler to fold in verbatim.
     Excluded → instruct a surface-only report that omits all mineral content.
     """
     if not include_minerals:
@@ -252,9 +166,7 @@ def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
             "sections are therefore: 1. Voluntary Liens, 2. Involuntary Liens, "
             "3. Servitudes, 4. Other Matters of Record.\n"
             "- Do not add mineral reservations, severances, or leases to any section, "
-            "and do not raise mineral issues under ATTORNEY REVIEW. This applies to "
-            "OBSERVED EXCEPTIONS too — that section still appears, but it covers only "
-            "unflagged SURFACE matters (easements, defects, heirship clouds, gaps)."
+            "and do not raise mineral issues under ATTORNEY REVIEW."
         )
     block = (mineral_analysis or "").strip() or "_No mineral analysis provided._"
     return (
@@ -266,13 +178,7 @@ def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
         "holder bullets under the `Minerals` sub-label in VESTING, verbatim — one "
         "holder per line.\n"
         "- Place its **MINERAL EXCEPTIONS** items under Exceptions bucket 4 (Other Matters of Record).\n"
-        "- Place its **MINERAL OBSERVED EXCEPTIONS** items in the OBSERVED EXCEPTIONS "
-        "section, keeping each item's basis parenthetical. Do NOT put them in a "
-        "numbered bucket.\n"
-        "- Place its **MINERAL LEASES** items under Exceptions bucket 5 (Mineral Leases) — "
-        "except any line ending in `[UNFLAGGED]`, which goes in OBSERVED EXCEPTIONS "
-        "instead. Strip the `[UNFLAGGED]` marker and replace it with a basis "
-        "parenthetical in the usual form.\n"
+        "- Place its **MINERAL LEASES** items under Exceptions bucket 5 (Mineral Leases).\n"
         "- Fold its **MINERAL ATTORNEY REVIEW** items into your ATTORNEY REVIEW section.\n"
         "- Use the supplied mineral analysis for everything about the mineral estate "
         "(do not recompute fractions).\n\n"
@@ -284,9 +190,9 @@ def _build_tract_prompt(
     tract_id: str, rows: list, le_rows: list, job: JobConfig,
     commentary: str = "", mineral_analysis: str = "",
 ) -> str:
-    """Prompt for the Opus full-report assembly. The mineral analysis from the
-    Opus phase is supplied verbatim for the assembler to fold in (or, when
-    minerals are excluded, a surface-only instruction replaces it)."""
+    """Prompt for the full-report assembly. The mineral analysis from phase 1 is
+    supplied verbatim for the assembler to fold in (or, when minerals are
+    excluded, a surface-only instruction replaces it)."""
     events_text, le_text = _events_blocks(rows, le_rows)
     parcel = job.for_tract(tract_id)
     job_context_parts = [
@@ -314,138 +220,49 @@ def _system_prompt() -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# API call with visible retries
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def _create_with_retry(
-    client: anthropic.Anthropic,
-    kwargs: dict,
-    on_progress: Callable[[str], None] | None,
-) -> anthropic.types.Message:
-    transient = (
-        anthropic.APIConnectionError,
-        anthropic.APITimeoutError,
-        anthropic.RateLimitError,
-        anthropic.InternalServerError,
-    )
-    for attempt in range(1, MAX_API_RETRIES + 1):
-        _check_stop()
-        t0 = time.time()
-        try:
-            resp = client.messages.create(**kwargs)
-            dt = time.time() - t0
-            if on_progress:
-                u = resp.usage
-                inp = u.input_tokens
-                cached = getattr(u, "cache_read_input_tokens", 0) or 0
-                cwrite = getattr(u, "cache_creation_input_tokens", 0) or 0
-                out = u.output_tokens
-                on_progress(
-                    f"API returned in {dt:.1f}s "
-                    f"(in={inp:,} cached={cached:,} cache_write={cwrite:,} out={out:,})"
-                )
-            return resp
-        except transient as e:
-            dt = time.time() - t0
-            if attempt >= MAX_API_RETRIES:
-                if on_progress:
-                    on_progress(f"API gave up after {attempt} attempts: {type(e).__name__}: {e}")
-                raise
-            sleep_s = min(RETRY_BACKOFF_BASE * (2 ** (attempt - 1)), 60.0)
-            if on_progress:
-                on_progress(
-                    f"API attempt {attempt}/{MAX_API_RETRIES} failed in {dt:.1f}s "
-                    f"({type(e).__name__}); retrying in {sleep_s:.0f}s"
-                )
-            if stop_event.wait(timeout=sleep_s):
-                raise AnalysisInterrupted("Interrupted during retry backoff")
-        except anthropic.APIStatusError as e:
-            if on_progress:
-                on_progress(f"API error: {type(e).__name__}: {e}")
-            raise
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # Public surface
 # ──────────────────────────────────────────────────────────────────────────
 
 
-_CONTINUE_PROMPT = (
-    "The previous response was cut off at the model output limit. "
-    "Continue from exactly where you stopped. Do NOT add a preamble, "
-    "do NOT repeat any content, do NOT restate context. Resume from "
-    "the exact word or punctuation where the prior turn ended, "
-    "even if mid-sentence."
-)
-
-
 def _generate(
-    client: anthropic.Anthropic,
-    model: str,
-    system_blocks: list[dict],
+    provider: Provider,
+    system: str,
     user_prompt: str,
     usage_by_model: dict,
     log: Callable[[str], None],
     *,
     thinking: bool = False,
 ) -> str:
-    """Run one model to completion, auto-continuing if it hits max_tokens.
-    Accumulates token usage into usage_by_model[model]. Returns the text."""
-    messages: list[dict] = [{"role": "user", "content": user_prompt}]
-    accumulated = ""
+    """Run one prompt to completion and return the text.
 
-    for attempt in range(1 + MAX_CONTINUATIONS):
-        _check_stop()
-        if attempt == 0:
-            log(f"calling {model} …")
-        else:
-            log(f"output truncated; continuation #{attempt} ({model}) …")
-            messages = messages + [
-                {"role": "assistant", "content": accumulated},
-                {"role": "user", "content": _CONTINUE_PROMPT},
-            ]
-
-        kwargs = dict(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            system=system_blocks,
-            messages=messages,
-            extra_headers=_CACHE_BETA_HEADER,
-        )
-        if thinking:
-            # Adaptive thinking + high effort. effort goes through extra_body to stay
-            # compatible with older anthropic SDK builds that don't type output_config.
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["extra_body"] = {"output_config": {"effort": "high"}}
-
-        resp = _create_with_retry(client, kwargs, log)
-        _acc(usage_by_model, model, resp)
-        chunk = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-        accumulated += chunk
-
-        if resp.stop_reason != "max_tokens":
-            break
-    else:
-        log(f"WARNING: still truncated after {MAX_CONTINUATIONS} continuations ({model})")
-        accumulated += (
+    Continuation past the output cap and token accounting live in the provider;
+    all this adds is the in-report marker for when even the continuations ran out.
+    """
+    text, truncated = provider.complete(
+        user_prompt=user_prompt,
+        usage=usage_by_model,
+        log=log,
+        system=system,
+        thinking=thinking,
+    )
+    if truncated:
+        text += (
             "\n\n*** ATTORNEY REVIEW — SECTION TRUNCATED: model hit output cap "
             f"after {MAX_CONTINUATIONS} continuation attempts. ***"
         )
-
-    return accumulated.strip()
+    return text
 
 
 def analyze_tract(
     *,
-    client: anthropic.Anthropic,
+    provider: Provider,
     tract,
     p,                       # ParsedRunSheet (kept for forward-compat / context)
     job: JobConfig,
     commentary: str = "",
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    """Two-phase per-tract analysis, both phases on Opus with adaptive thinking:
+    """Two-phase per-tract analysis, both phases reasoning at high effort:
 
       1. Mineral chain (more complex). Produces a concise mineral-vesting /
          mineral-exception block.
@@ -453,29 +270,27 @@ def analyze_tract(
          and exceptions, folding in the phase-1 mineral block verbatim.
 
     Returns (report_text, usage_by_model) where usage_by_model maps each model
-    id to its TokenUsage.
+    id to its TokenUsage. With failover enabled the two phases can land on
+    different providers, so that dict is also the record of what produced what.
     """
     log = on_progress or (lambda s: None)
     usage: dict[str, TokenUsage] = {}
-    model = active_model(client, log)
-    system_blocks = [{"type": "text", "text": _system_prompt(), "cache_control": _CACHE_LONG}]
+    system = _system_prompt()
 
-    # Phase 1 — mineral chain on Opus (skipped entirely when minerals excluded).
+    # Phase 1 — mineral chain (skipped entirely when minerals excluded).
     mineral_text = ""
     if job.include_minerals:
-        log("mineral chain analysis (Opus) …")
+        log("mineral chain analysis …")
         mineral_prompt = _build_mineral_prompt(tract.id, tract.rows, tract.le_rows, job, commentary)
-        mineral_text = _generate(client, model, system_blocks, mineral_prompt, usage, log, thinking=True)
+        mineral_text = _generate(provider, system, mineral_prompt, usage, log, thinking=True)
     else:
         log("minerals excluded — surface-only report")
 
-    # Phase 2 — full report on Opus, given the Opus mineral analysis.
-    log("assembling report (Opus) …")
+    # Phase 2 — full report, given the phase-1 mineral analysis.
+    log("assembling report …")
     report_prompt = _build_tract_prompt(
         tract.id, tract.rows, tract.le_rows, job, commentary, mineral_text
     )
-    report_text = _generate(
-        client, model, system_blocks, report_prompt, usage, log, thinking=True
-    )
+    report_text = _generate(provider, system, report_prompt, usage, log, thinking=True)
 
     return report_text, usage

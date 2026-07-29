@@ -164,6 +164,42 @@ If any area returns `confidence: low`, the pipeline re-asks that area with model
 - Model: the newest `claude-opus-*` the Models API reports at startup, with `claude-opus-5` as the floor and the fallback if the lookup fails. Pin an exact id with the `RUN_SHEET_MODEL` environment variable. All phases run on the same model, with adaptive thinking enabled (`thinking: { type: "adaptive" }`, `output_config.effort: "high"`).
 - Prompt caching: system prompt + the full run-sheet markdown table get `cache_control: ephemeral`. The full run sheet is cached **once per process run** and reused across all tracts in the same invocation. Per-tract user messages are not cached.
 
+### 6.2.1 Provider abstraction & failover
+
+Every model call goes through one method on a provider object (`providers.py`):
+
+```python
+text, truncated = provider.complete(
+    user_prompt=..., usage=..., log=..., system=..., thinking=...,
+)
+```
+
+`complete()` owns the continuation loop (re-asking the model when it stops at the output cap) and token accounting, keyed by model id. Nothing above it knows which vendor answered.
+
+Three implementations:
+
+| | Transport | Reasoning | Caching |
+|---|---|---|---|
+| `AnthropicProvider` | Messages API | `thinking: adaptive`, `effort: high` | explicit `cache_control` with 1h TTL on the system block |
+| `OpenAIProvider` | Responses API (`instructions` + `input`) | `reasoning.effort: high` | automatic above 1024 tokens; stable `prompt_cache_key` so parallel workers share the prefix |
+| `FailoverProvider` | delegates | — | — |
+
+**Failover policy.** `FailoverProvider` runs the primary and, if the call fails in a way that means *this provider can't serve it right now*, re-runs the entire call on the secondary. Classification is by HTTP status rather than by SDK exception class, because the statuses are stable across SDK versions while the class hierarchy is not — the original 529 bug was exactly this: `anthropic.OverloadedError` subclasses `APIStatusError`, **not** `InternalServerError`, so a retry list written in terms of exception classes silently excluded the single most common transient failure.
+
+- Retried in place (exponential backoff, capped at 60s): 408, 409, 429, 500, 502, 503, 504, **529**, plus connection and timeout errors.
+- Failed over after retries are exhausted: everything above, plus 401/403 (bad key) and 404 (model not reachable by this account).
+- Never failed over: 400 and 422. The request itself is malformed, so the other provider would reject it too — surfacing the error is correct.
+
+Failover granularity is **one `complete()` call**, so a tract Claude can't serve is regenerated from scratch on OpenAI rather than spliced together mid-section. Because the mineral phase and the assembly phase are separate calls, they can land on different providers; the phase-1 mineral block is passed to phase 2 verbatim as text, so this is safe by construction.
+
+After a failover the primary is skipped for `RUN_SHEET_FAILOVER_COOLDOWN` seconds (default 300). Without it, every remaining tract re-pays the full retry ladder (~45s per call) against an outage already known to be in progress.
+
+**Token normalization.** Anthropic reports its three input buckets disjointly; OpenAI reports `input_tokens` as the total with the cached and cache-written portions broken out as subsets. `_openai_counts()` subtracts so both providers land in the same disjoint buckets and `cost_usd` stays honest — a cache-written token bills once at 1.25× input, not at 1× plus 1.25×.
+
+**Confidentiality.** OpenAI's `store` parameter defaults to `False` here: run sheets are client work product, so no 30-day server-side copy is left behind unless `RUN_SHEET_OPENAI_STORE=1` is set explicitly.
+
+**Provenance.** With failover on, a report can mix models. `analyze_tract` returns `usage_by_model`, whose keys are the record of what produced what; the CLI names them per tract (`via gpt-5.6-sol`) and breaks cost out per model in the closing summary. `RUN_SHEET_PROVIDER` / `--provider` pin a single provider when a report must be single-model.
+
 ### 6.3 Output schemas (JSON, condensed)
 
 All schema examples below use `<tract_id>` as a placeholder; the actual tract IDs come from the run sheet at runtime.

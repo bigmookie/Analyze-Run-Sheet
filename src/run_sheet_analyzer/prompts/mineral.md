@@ -37,10 +37,13 @@ Total <sum> — reconciles.
 <If the fractions cannot be reconciled to 1, replace the Total line with: Total <sum> — MINERAL RECONCILIATION ISSUE: <brief description>.>
 
 MINERAL EXCEPTIONS:
-- <Each outstanding mineral reservation, severance, NPRI, ORRI, term-mineral, or executive-right severance affecting title, one per line, with citation. Or "None.">
+- <Each outstanding mineral reservation, severance, NPRI, ORRI, term-mineral, or executive-right severance affecting title whose source event is FLAGGED (`EXCEPTION` or `MINERAL TRANSFER` on its `Abstractor flags:` line), one per line, with citation. Or "None.">
+
+MINERAL OBSERVED EXCEPTIONS:
+- <Each outstanding mineral matter of the same kinds whose source event carries NO abstractor flag, one per line, with citation, each ending in a parenthetical stating the basis — what makes it an exception and why it is unflagged. Or "None.">
 
 MINERAL LEASES:
-- <Each oil, gas and mineral lease of record and its assignments/ratifications/extensions not shown released, one per line, with citation. Or "None.">
+- <Each oil, gas and mineral lease of record and its assignments/ratifications/extensions not shown released, one per line, with citation. Mark an entry `[UNFLAGGED]` at the end of its line if its source event carries no abstractor flag. Or "None.">
 
 MINERAL ATTORNEY REVIEW:
 - <Each mineral-specific issue the closer should address (gaps in the mineral chain, unresolved fractions, ambiguous reservations), one per line. Omit this whole block if there are none.>

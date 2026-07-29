@@ -63,7 +63,11 @@ def _add_paragraph(
 
 
 # Top-level report sections, rendered as bold headings with space above.
-_SECTION_HEADS = {"VESTING", "DESCRIPTION", "EXCEPTIONS", "ATTORNEY REVIEW"}
+# Matched by equality, not prefix, so "EXCEPTIONS" and "OBSERVED EXCEPTIONS"
+# coexist without either shadowing the other.
+_SECTION_HEADS = {
+    "VESTING", "DESCRIPTION", "EXCEPTIONS", "OBSERVED EXCEPTIONS", "ATTORNEY REVIEW",
+}
 # VESTING sub-labels, rendered bold (accepted with or without a trailing colon).
 _SUB_LABELS = {"Surface", "Minerals"}
 

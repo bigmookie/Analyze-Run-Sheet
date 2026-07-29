@@ -33,7 +33,10 @@ CANONICAL_HEADERS: dict[str, list[str]] = {
 REQUIRED_FIELDS: set[str] = set(CANONICAL_HEADERS.keys())
 
 OPTIONAL_HEADERS: dict[str, list[str]] = {
-    "instrument_no":       ["instrument no", "inst no", "instrument number"],
+    # Header matching drops '.' and '#', so "Instrument No." and "Inst #" both
+    # normalize into this list.
+    "instrument_no":       ["instrument no", "inst no", "instrument number",
+                            "instrument", "inst", "recording no", "recording number"],
 }
 
 
@@ -63,12 +66,32 @@ class RunSheetRow:
     exception_flag: bool
     mineral_transfer_flag: bool
 
+    NO_RECORDING_DATA = "recording data not shown on the run sheet"
+
     @property
     def cite(self) -> str:
-        bits = [f"Book {self.book}, Page {self.page}"]
+        """Recording reference in the firm's house format.
+
+        Book/Page is the primary reference, but counties that have moved to
+        instrument numbering leave it blank on newer documents — the instrument
+        number is the recording data for those rows, not a missing citation.
+        """
+        if self.book and self.page:
+            book_page = f"Book {self.book} at Page {self.page}"
+        elif self.book:
+            book_page = f"Book {self.book}"
+        elif self.page:
+            book_page = f"Page {self.page}"
+        else:
+            book_page = ""
+
+        if book_page and self.instrument_no:
+            return f"{book_page} (Instrument No. {self.instrument_no})"
+        if book_page:
+            return book_page
         if self.instrument_no:
-            bits.append(f"Inst. No. {self.instrument_no}")
-        return ", ".join(bits)
+            return f"Instrument No. {self.instrument_no}"
+        return self.NO_RECORDING_DATA
 
 
 @dataclass
@@ -91,9 +114,15 @@ class ParsedRunSheet:
 
 
 def _norm_header(h: object) -> str:
+    """Normalize a header cell for synonym matching.
+
+    Abbreviation punctuation is dropped so "Instrument No.", "Inst. No." and
+    "Inst #" all reduce to the same key. No canonical header contains '.' or
+    '#', so removing them can't collide with another column.
+    """
     if h is None:
         return ""
-    return re.sub(r"\s+", " ", str(h).strip().lower())
+    return re.sub(r"\s+", " ", re.sub(r"[.#]", "", str(h)).strip().lower())
 
 
 def _build_header_map(header_row: list[object]) -> tuple[dict[str, int], dict[str, int]]:

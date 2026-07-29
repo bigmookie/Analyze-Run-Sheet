@@ -175,9 +175,7 @@ def _load_prompt(name: str) -> str:
 
 def _format_event(row, idx: int) -> str:
     """One bullet per row in the events table."""
-    cite = f"Book {row.book} at Page {row.page}"
-    if row.instrument_no:
-        cite = f"Instrument No. {row.instrument_no} ({cite})"
+    cite = row.cite   # Book/Page when present, else Instrument No.
     recorded = row.date_recorded.isoformat() if row.date_recorded else "n/a"
     grantors = " | ".join(row.grantors) or "—"
     grantees = " | ".join(row.grantees) or "—"
@@ -254,7 +252,9 @@ def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
             "sections are therefore: 1. Voluntary Liens, 2. Involuntary Liens, "
             "3. Servitudes, 4. Other Matters of Record.\n"
             "- Do not add mineral reservations, severances, or leases to any section, "
-            "and do not raise mineral issues under ATTORNEY REVIEW."
+            "and do not raise mineral issues under ATTORNEY REVIEW. This applies to "
+            "OBSERVED EXCEPTIONS too — that section still appears, but it covers only "
+            "unflagged SURFACE matters (easements, defects, heirship clouds, gaps)."
         )
     block = (mineral_analysis or "").strip() or "_No mineral analysis provided._"
     return (
@@ -266,7 +266,13 @@ def _mineral_section(mineral_analysis: str, include_minerals: bool) -> str:
         "holder bullets under the `Minerals` sub-label in VESTING, verbatim — one "
         "holder per line.\n"
         "- Place its **MINERAL EXCEPTIONS** items under Exceptions bucket 4 (Other Matters of Record).\n"
-        "- Place its **MINERAL LEASES** items under Exceptions bucket 5 (Mineral Leases).\n"
+        "- Place its **MINERAL OBSERVED EXCEPTIONS** items in the OBSERVED EXCEPTIONS "
+        "section, keeping each item's basis parenthetical. Do NOT put them in a "
+        "numbered bucket.\n"
+        "- Place its **MINERAL LEASES** items under Exceptions bucket 5 (Mineral Leases) — "
+        "except any line ending in `[UNFLAGGED]`, which goes in OBSERVED EXCEPTIONS "
+        "instead. Strip the `[UNFLAGGED]` marker and replace it with a basis "
+        "parenthetical in the usual form.\n"
         "- Fold its **MINERAL ATTORNEY REVIEW** items into your ATTORNEY REVIEW section.\n"
         "- Use the supplied mineral analysis for everything about the mineral estate "
         "(do not recompute fractions).\n\n"
